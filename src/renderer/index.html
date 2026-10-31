@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: local-media: local-thumb:; media-src local-media:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LocalContentManager</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">LC</div>
+          <div>
+            <h1>LocalContent</h1>
+            <p>Private media workspace</p>
+          </div>
+        </div>
+
+        <section class="library-card">
+          <span class="eyebrow">Media library</span>
+          <strong id="root-name">No folder selected</strong>
+          <span id="root-path" class="muted">Choose a folder to begin.</span>
+          <div class="button-row">
+            <button id="choose-folder" class="primary">Choose folder</button>
+            <button id="rescan" class="icon-button" title="Rescan media" aria-label="Rescan media">↻</button>
+          </div>
+        </section>
+
+        <section class="library-card recycle-card">
+          <span class="eyebrow">Deletion behavior</span>
+          <strong id="recycle-name">Permanent deletion</strong>
+          <span id="recycle-path" class="muted">No recycling bin configured.</span>
+          <div class="button-row">
+            <button id="choose-recycle" class="secondary compact">Choose recycling folder</button>
+            <button id="clear-recycle" class="text-button hidden">Use permanent delete</button>
+          </div>
+        </section>
+
+        <nav class="filters" aria-label="Media filters">
+          <button class="filter active" data-type="all"><span>All media</span><b id="count-all">0</b></button>
+          <button class="filter" data-type="image"><span>Photos</span><b id="count-image">0</b></button>
+          <button class="filter" data-type="video"><span>Videos</span><b id="count-video">0</b></button>
+          <button class="filter" data-type="audio"><span>Audio</span><b id="count-audio">0</b></button>
+          <button class="filter" data-type="favorite"><span>Favorites</span><b id="count-favorite">0</b></button>
+        </nav>
+
+        <section class="privacy-note">
+          <span aria-hidden="true">●</span>
+          <div>
+            <strong>Local-only mode</strong>
+            <p>No media or metadata is uploaded.</p>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">Your collection</span>
+            <h2 id="view-title">All media</h2>
+          </div>
+          <label class="search">
+            <span aria-hidden="true">⌕</span>
+            <input id="search" type="search" placeholder="Search names, paths, or tags" autocomplete="off" />
+          </label>
+          <button id="open-organizer" class="agent-button">✦ Organize with agent</button>
+        </header>
+
+        <section id="welcome" class="welcome">
+          <div class="welcome-art" aria-hidden="true">
+            <span>▧</span><span>♪</span><span>▶</span>
+          </div>
+          <span class="eyebrow">Private by design</span>
+          <h2>Bring order to your media library.</h2>
+          <p>
+            Browse photos, videos, and audio. Add local tags and favorites, then preview a safe
+            organization plan before any file moves.
+          </p>
+          <button id="welcome-choose" class="primary large">Choose a media folder</button>
+        </section>
+
+        <section id="collection" class="collection hidden">
+          <div class="summary">
+            <span id="result-summary">0 items</span>
+            <span id="library-size">0 B</span>
+          </div>
+          <div id="media-grid" class="media-grid" aria-live="polite"></div>
+          <div id="empty-results" class="empty-results hidden">
+            <strong>No media matches this view.</strong>
+            <p>Try a different search or filter.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="details-dialog" class="modal details-modal">
+      <form method="dialog" id="details-form">
+        <button class="close" value="cancel" aria-label="Close">×</button>
+        <div id="details-preview" class="details-preview"></div>
+        <div class="details-body">
+          <span id="details-type" class="eyebrow"></span>
+          <h2 id="details-name"></h2>
+          <p id="details-path" class="path"></p>
+          <dl class="facts">
+            <div><dt>Size</dt><dd id="details-size"></dd></div>
+            <div><dt>Modified</dt><dd id="details-date"></dd></div>
+          </dl>
+          <label class="field">
+            <span>Tags</span>
+            <input id="details-tags" type="text" maxlength="400" placeholder="family, vacation, portfolio" />
+            <small>Comma-separated, stored only on this device.</small>
+          </label>
+          <label class="favorite-toggle">
+            <input id="details-favorite" type="checkbox" />
+            <span>Mark as favorite</span>
+          </label>
+          <div class="modal-actions">
+            <div class="actions-left">
+              <button id="reveal-file" type="button" class="secondary">Show in folder</button>
+              <button id="delete-file" type="button" class="danger">Delete</button>
+            </div>
+            <button value="save" class="primary">Save metadata</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="organizer-dialog" class="modal organizer-modal">
+      <div class="organizer-layout">
+        <header>
+          <div>
+            <span class="eyebrow">Local organization planner</span>
+            <h2>Describe the result you want</h2>
+            <p>
+              Uses metadata rules or private on-device image analysis. Image pixels never leave
+              this computer.
+            </p>
+          </div>
+          <button id="close-organizer" class="close" aria-label="Close">×</button>
+        </header>
+        <form id="goal-form" class="goal-form">
+          <textarea
+            id="goal"
+            maxlength="400"
+            required
+            placeholder="Organize everything by year, media type, and my tags"
+          ></textarea>
+          <div id="goal-status" class="goal-status" role="status" aria-live="polite">
+            Supported: ordered visual categories, year, media type, existing tags, and favorites.
+          </div>
+          <div class="suggestions">
+            <button type="button" data-goal="Organize by year and media type">By year + type</button>
+            <button type="button" data-goal="Organize by media type and tags">By type + tags</button>
+            <button type="button" data-goal="Organize by year and favorite status">Years + favorites</button>
+          </div>
+          <div class="analysis-actions">
+            <button id="cancel-analysis" class="secondary hidden" type="button">Cancel analysis</button>
+            <button class="agent-button" type="submit">✦ Build a dry-run plan</button>
+          </div>
+        </form>
+        <section id="plan" class="plan hidden">
+          <div class="plan-head">
+            <div>
+              <span class="eyebrow">Dry run</span>
+              <strong id="plan-summary"></strong>
+            </div>
+            <label><input id="select-all" type="checkbox" checked /> Select all</label>
+          </div>
+          <div id="plan-items" class="plan-items"></div>
+          <footer>
+            <span id="selected-summary">0 moves selected</span>
+            <button id="apply-plan" class="primary">Apply selected moves</button>
+          </footer>
+        </section>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
