@@ -3,9 +3,13 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $manifest = Get-Content (Join-Path $projectRoot "package.json") -Raw | ConvertFrom-Json
 $version = [string] $manifest.version
+$productName = [string] $manifest.productName
 $semverPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
 if ($version -notmatch $semverPattern) {
   throw "package.json version '$version' is not valid Semantic Versioning."
+}
+if (-not $productName.Trim()) {
+  throw "package.json productName is required."
 }
 
 $runtimeExecutable = Join-Path $projectRoot ".runtime\electron.exe"
@@ -38,6 +42,7 @@ if (Test-Path $installerPath) {
 
 & $compilerPath `
   "/DAppVersion=$version" `
+  "/DAppDisplayName=$productName" `
   "/DSourceRoot=$projectRoot" `
   "/DOutputDir=$distDirectory" `
   $scriptPath

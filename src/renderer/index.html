@@ -7,7 +7,7 @@
       content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: local-media: local-thumb:; media-src local-media:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LocalContentManager</title>
+    <title>Local Content Manager</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -16,7 +16,7 @@
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">LC</div>
           <div>
-            <h1>LocalContent</h1>
+            <h1>Local Content Manager</h1>
             <p>Private media workspace</p>
           </div>
         </div>
@@ -25,6 +25,7 @@
           <span class="eyebrow">Media library</span>
           <strong id="root-name">No folder selected</strong>
           <span id="root-path" class="muted">Choose a folder to begin.</span>
+          <span class="settings-lock-note">Only you can change this through the folder picker.</span>
           <div class="button-row">
             <button id="choose-folder" class="primary">Choose folder</button>
             <button id="rescan" class="icon-button" title="Rescan media" aria-label="Rescan media">↻</button>
@@ -35,10 +36,19 @@
           <span class="eyebrow">Deletion behavior</span>
           <strong id="recycle-name">Permanent deletion</strong>
           <span id="recycle-path" class="muted">No recycling bin configured.</span>
+          <span class="settings-lock-note">Only you can change this setting.</span>
           <div class="button-row">
             <button id="choose-recycle" class="secondary compact">Choose recycling folder</button>
             <button id="clear-recycle" class="text-button hidden">Use permanent delete</button>
           </div>
+        </section>
+
+        <section class="library-card">
+          <label class="eyebrow" for="category-view">Category view</label>
+          <select id="category-view">
+            <option value="">Unsorted</option>
+          </select>
+          <span class="settings-lock-note">Unsorted shows loose files at the media-library root.</span>
         </section>
 
         <nav class="filters" aria-label="Media filters">
@@ -101,7 +111,11 @@
     <dialog id="details-dialog" class="modal details-modal">
       <form method="dialog" id="details-form">
         <button class="close" value="cancel" aria-label="Close">×</button>
-        <div id="details-preview" class="details-preview"></div>
+        <div class="details-preview-wrap">
+          <button id="previous-image" type="button" class="preview-nav previous" aria-label="Previous image">‹</button>
+          <div id="details-preview" class="details-preview"></div>
+          <button id="next-image" type="button" class="preview-nav next" aria-label="Next image">›</button>
+        </div>
         <div class="details-body">
           <span id="details-type" class="eyebrow"></span>
           <h2 id="details-name"></h2>
@@ -110,6 +124,24 @@
             <div><dt>Size</dt><dd id="details-size"></dd></div>
             <div><dt>Modified</dt><dd id="details-date"></dd></div>
           </dl>
+          <section class="category-assignment">
+            <div class="category-heading">
+              <span>Move to category</span>
+              <button id="recommend-category" type="button" class="secondary compact">Ask AI</button>
+              <small>Moves immediately and advances to the next image.</small>
+            </div>
+            <div id="details-categories" class="category-list"></div>
+            <div id="category-recommendation" class="category-recommendation hidden">
+              <span id="category-recommendation-text"></span>
+              <button id="apply-recommendation" type="button" class="primary">Move to recommendation</button>
+            </div>
+            <div class="new-category">
+              <input id="new-category-name" type="text" maxlength="60" placeholder="New category name" autocomplete="off" />
+              <input id="new-category-description" type="text" maxlength="500" placeholder="Description (what belongs here)" autocomplete="off" />
+              <button id="draft-category-description" type="button" class="agent-button">Draft with AI</button>
+              <button id="create-category" type="button" class="secondary">Create & move</button>
+            </div>
+          </section>
           <label class="field">
             <span>Tags</span>
             <input id="details-tags" type="text" maxlength="400" placeholder="family, vacation, portfolio" />
@@ -137,12 +169,29 @@
             <span class="eyebrow">Local organization planner</span>
             <h2>Describe the result you want</h2>
             <p>
-              Uses metadata rules or private on-device image analysis. Image pixels never leave
-              this computer.
+              Uses metadata rules or your selected GitHub Copilot vision model.
             </p>
           </div>
           <button id="close-organizer" class="close" aria-label="Close">×</button>
         </header>
+        <section class="model-settings">
+          <label for="vision-model">Vision model</label>
+          <select id="vision-model" disabled>
+            <option>Loading available Copilot models…</option>
+          </select>
+          <label for="vision-concurrency">Maximum parallel sessions</label>
+          <select id="vision-concurrency">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="4" selected>4</option>
+            <option value="8">8</option>
+          </select>
+          <span id="vision-model-status">Uses the model catalog available to your signed-in Copilot account.</span>
+        </section>
+        <p class="cloud-disclosure">
+          Visual prompts upload resized, metadata-free image copies to GitHub Copilot for
+          classification. Filenames and folder paths are not uploaded.
+        </p>
         <form id="goal-form" class="goal-form">
           <textarea
             id="goal"
@@ -163,6 +212,13 @@
             <button class="agent-button" type="submit">✦ Build a dry-run plan</button>
           </div>
         </form>
+        <section id="analysis-progress" class="analysis-progress hidden" aria-live="polite">
+          <progress id="analysis-progress-bar" max="1" value="0"></progress>
+          <div>
+            <span id="analysis-progress-count">Preparing analysis…</span>
+            <span id="analysis-progress-eta"></span>
+          </div>
+        </section>
         <section id="plan" class="plan hidden">
           <div class="plan-head">
             <div>

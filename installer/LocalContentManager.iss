@@ -7,16 +7,19 @@
 #ifndef OutputDir
   #error OutputDir must be supplied by the build script.
 #endif
+#ifndef AppDisplayName
+  #error AppDisplayName must be supplied by the build script.
+#endif
 
 [Setup]
 AppId={{1DC5010B-1BA2-4796-A67C-C87CF0E5621D}
-AppName=LocalContentManager
+AppName={#AppDisplayName}
 AppVersion={#AppVersion}
-AppVerName=LocalContentManager {#AppVersion}
-AppPublisher=LocalContentManager
+AppVerName={#AppDisplayName} {#AppVersion}
+AppPublisher={#AppDisplayName}
 AppPublisherURL=https://github.com/
 DefaultDirName={localappdata}\Programs\LocalContentManager
-DefaultGroupName=LocalContentManager
+DefaultGroupName={#AppDisplayName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir={#OutputDir}
@@ -25,7 +28,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\.runtime\electron.exe
-UninstallDisplayName=LocalContentManager
+UninstallDisplayName={#AppDisplayName}
 MinVersion=10.0.17763
 CloseApplications=force
 RestartApplications=no
@@ -39,10 +42,15 @@ Source: "{#SourceRoot}\package.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\LocalContentManager"; Filename: "{app}\.runtime\electron.exe"; Parameters: """{app}"""; WorkingDir: "{app}"; Comment: "LocalContentManager {#AppVersion}"
+Name: "{autoprograms}\{#AppDisplayName}"; Filename: "{app}\.runtime\electron.exe"; Parameters: """{app}"""; WorkingDir: "{app}"; Comment: "{#AppDisplayName} {#AppVersion}"
+
+[InstallDelete]
+Type: files; Name: "{autoprograms}\LocalContentManager.lnk"
+Type: filesandordirs; Name: "{app}\src"
+Type: filesandordirs; Name: "{app}\node_modules"
 
 [Run]
-Filename: "{app}\.runtime\electron.exe"; Parameters: """{app}"""; WorkingDir: "{app}"; Description: "Launch LocalContentManager"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\.runtime\electron.exe"; Parameters: """{app}"""; WorkingDir: "{app}"; Description: "Launch {#AppDisplayName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;

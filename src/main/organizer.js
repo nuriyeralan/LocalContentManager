@@ -7,6 +7,16 @@ const MAX_GOAL_LENGTH = 400;
 const VISUAL_CONFIDENCE_THRESHOLD = 0.3;
 const PRIORITY_SCORE_TOLERANCE = 0.04;
 const OTHER_IMAGE_PROMPT = "another kind of image that does not match the requested categories";
+const VISUAL_CONCEPTS = [
+  { pattern: /\b(people|persons?|faces?|portraits?|selfies?)\b/i, label: "people" },
+  { pattern: /\b(text|writing|written|words?|ocr)\b/i, label: "visible text" },
+  { pattern: /\b(cartoons?|comics?)\b/i, label: "cartoons or comics" },
+  {
+    pattern: /\b(memes?|well[- ]recognized internet images?|viral images?)\b/i,
+    label: "memes or internet images",
+  },
+  { pattern: /\b(reactions?|reaction images?|reaction gifs?)\b/i, label: "reactions" },
+];
 
 function safeSegment(value) {
   const segment = String(value)
@@ -17,69 +27,179 @@ function safeSegment(value) {
 }
 
 function visualConceptsIn(goal) {
-  const concepts = [
-    [/\b(people|persons?|faces?|portraits?|selfies?)\b/, "people"],
-    [/\b(text|writing|written|words?|ocr)\b/, "visible text"],
-    [/\b(cartoons?|comics?)\b/, "cartoons or comics"],
-    [/\b(memes?|well[- ]recognized internet images?|viral images?)\b/, "memes or internet images"],
-    [/\b(reactions?|reaction images?|reaction gifs?)\b/, "reactions"],
-  ];
-  return concepts.filter(([pattern]) => pattern.test(goal)).map(([, label]) => label);
+  return VISUAL_CONCEPTS.filter(({ pattern }) => pattern.test(goal)).map(({ label }) => label);
 }
 
-function visualCategoryDetails(label) {
+function cleanVisualSource(value) {
+  return value
+    .replace(/^(?:let'?s\s+)?(?:move|organize|sort|put)\s+/i, "")
+    .replace(/^(?:all|the\s+remaining)\s+/i, "")
+    .trim();
+}
+
+function visualPromptForSource(source) {
+  const cleaned = cleanVisualSource(source);
+  const normalized = cleaned.toLocaleLowerCase();
+  const ofMatch = cleaned.match(/^(?:images?|photos?|pictures?)\s+of\s+(.+)$/i);
+  if (ofMatch) return `a photograph of ${ofMatch[1]}`;
+  const adjectivePhotoMatch = cleaned.match(/^(.+?)\s+(?:images?|photos?|pictures?)$/i);
+  if (adjectivePhotoMatch) return `a photograph of ${adjectivePhotoMatch[1]}`;
+  const withMatch = cleaned.match(/^(?:images?|photos?|pictures?)\s+with\s+(.+)$/i);
+  if (withMatch) return `an image containing ${withMatch[1]}`;
+  if (/\bscreenshots?\b/.test(normalized)) return `a ${cleaned.replace(/^.*?\bscreenshots?\b/i, "screenshot")}`;
+  return `an image matching the visual description: ${cleaned}`;
+}
+
+function visualCategoryDetails(label, destinationName = null) {
+  const query = cleanVisualSource(label);
   const normalized = label.toLocaleLowerCase();
+  let details;
   if (/\b(people|persons?|faces?|portraits?|selfies?)\b/.test(normalized)) {
-    return { name: "People", prompt: "a photograph containing one or more people" };
-  }
-  if (/\b(text|writing|written|words?|ocr)\b/.test(normalized)) {
-    return {
+    details = { name: "People", prompt: "a photograph containing one or more people" };
+  } else if (/\b(text|writing|written|words?|ocr)\b/.test(normalized)) {
+    details = {
       name: "Text",
       prompt: "an image containing prominent visible text, such as a screenshot, document, or sign",
     };
-  }
-  if (/\b(cartoons?|comics?)\b/.test(normalized)) {
-    return { name: "Cartoons or Comics", prompt: "a cartoon, comic, illustration, or drawn panel" };
-  }
-  if (/\b(memes?|internet images?|viral images?)\b/.test(normalized)) {
-    return { name: "Memes or Internet Images", prompt: "a recognizable internet meme or viral image" };
-  }
-  if (/\b(reactions?|reaction images?|reaction gifs?)\b/.test(normalized)) {
-    return {
+  } else if (/\b(cartoons?|comics?)\b/.test(normalized)) {
+    details = {
+      name: "Cartoons or Comics",
+      prompt: "a cartoon, comic, illustration, or drawn panel",
+    };
+  } else if (/\b(memes?|internet images?|viral images?)\b/.test(normalized)) {
+    details = {
+      name: "Memes or Internet Images",
+      prompt: "a recognizable internet meme or viral image",
+    };
+  } else if (/\b(reactions?|reaction images?|reaction gifs?)\b/.test(normalized)) {
+    details = {
       name: "Reactions",
       prompt: "a reaction image expressing an emotion or response",
     };
+  } else {
+    const name = query
+      .replace(/^(?:images?|photos?|pictures?)\s+(?:of|with|containing)\s+/i, "")
+      .trim();
+    details = {
+      name: name.replace(/\b\w/g, (letter) => letter.toLocaleUpperCase()),
+      prompt: visualPromptForSource(query),
+    };
   }
 
-  const name = label
-    .replace(/^(?:images?|photos?|pictures?)\s+(?:of|with|containing)\s+/i, "")
-    .trim();
   return {
-    name: name.replace(/\b\w/g, (letter) => letter.toLocaleUpperCase()),
-    prompt: `an image matching the category: ${name}`,
+    ...details,
+    name: destinationName?.trim() || details.name,
+    query,
+    explicitDestination: Boolean(destinationName),
+  };
+}
+
+function parseVisualMapping(value) {
+  const match = value
+    .trim()
+    .match(/^(.*?)\s+(?:to|into)\s+(?:"([^"]+)"|'([^']+)'|(.+?))\s*$/i);
+  if (!match) return null;
+  const source = cleanVisualSource(match[1]);
+  const destination = (match[2] || match[3] || match[4] || "").trim();
+  const looksVisual =
+    /\b(images?|photos?|pictures?|screenshots?|people|persons?|faces?|portraits?|selfies?|text|writing|words?|cartoons?|comics?|memes?|reactions?|bab(?:y|ies)|food)\b/i.test(
+      source,
+    );
+  if (!looksVisual || !destination) return null;
+  return visualCategoryDetails(source, destination);
+}
+
+function createVisualRequestFromMappings(mappings) {
+  const categories = mappings.map(
+    ({ visualQuery, destinationFolder, explicitDestination = true }) =>
+      visualCategoryDetails(
+        visualQuery,
+        explicitDestination ? destinationFolder : null,
+      ),
+  );
+  const uniqueCategories = [];
+  const seen = new Set();
+  for (const category of categories) {
+    const key = `${category.name}\0${category.prompt}`.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueCategories.push(category);
+    }
+  }
+  return {
+    categories: uniqueCategories,
+    labels: [...uniqueCategories.map((category) => category.prompt), OTHER_IMAGE_PROMPT],
+    otherLabel: OTHER_IMAGE_PROMPT,
   };
 }
 
 function parseVisualRequest(goal) {
   if (typeof goal !== "string") return null;
+  if (/\b(tags?|tagged)\b/i.test(goal)) return null;
   const lines = goal.split(/\r?\n/);
   const categoryLines = lines
     .map((line) => line.match(/^\s*(?:[-*•]|\d+[.)])\s+(.+?)\s*$/)?.[1])
     .filter(Boolean);
-  if (categoryLines.length < 2) return null;
-
-  const introduction = lines.slice(0, lines.findIndex((line) => /^\s*(?:[-*•]|\d+[.)])\s+/.test(line))).join(" ");
+  const firstCategoryLine = lines.findIndex((line) => /^\s*(?:[-*•]|\d+[.)])\s+/.test(line));
+  const introduction = firstCategoryLine === -1 ? goal : lines.slice(0, firstCategoryLine).join(" ");
   const describesVisualGrouping =
-    /\b(categor(?:y|ies|ize|ization)|priority|visual|content)\b/i.test(introduction) ||
-    categoryLines.some((line) => visualConceptsIn(line.toLocaleLowerCase()).length > 0);
-  if (!describesVisualGrouping) return null;
+    /\b(categor(?:y|ies|ize|ization)|priority|visual|content|images?|photos?|pictures?)\b/i.test(
+      introduction,
+    ) || categoryLines.some((line) => visualConceptsIn(line).length > 0);
 
-  const categories = categoryLines.map(visualCategoryDetails);
-  return {
-    categories,
-    labels: [...categories.map((category) => category.prompt), OTHER_IMAGE_PROMPT],
-    otherLabel: OTHER_IMAGE_PROMPT,
-  };
+  let categories = [];
+  const mappedCategories = categoryLines.map(parseVisualMapping);
+  if (mappedCategories.some(Boolean)) {
+    categories = categoryLines.map(
+      (line, index) => mappedCategories[index] || visualCategoryDetails(line),
+    );
+  } else if (categoryLines.length > 0 && describesVisualGrouping) {
+    categories = categoryLines.map((line) => visualCategoryDetails(line));
+  } else {
+    const wholeCommand = parseVisualMapping(goal.replace(/\s+/g, " "));
+    if (wholeCommand) {
+      categories = [wholeCommand];
+    } else {
+      categories = VISUAL_CONCEPTS.map(({ pattern }) => {
+        const match = pattern.exec(goal);
+        return match ? { index: match.index, label: match[0] } : null;
+      })
+        .filter(Boolean)
+        .sort((left, right) => left.index - right.index)
+        .map(({ label }) => visualCategoryDetails(label));
+    }
+  }
+  if (categories.length === 0) return null;
+
+  return createVisualRequestFromMappings(
+    categories.map((category) => ({
+      visualQuery: category.query,
+      destinationFolder: category.name,
+      explicitDestination: category.explicitDestination,
+    })),
+  );
+}
+
+function looksLikeVisualRequest(goal) {
+  if (typeof goal !== "string" || !goal.trim()) return false;
+  const normalized = goal.toLocaleLowerCase();
+  if (
+    /\bby\s+(?:year|date|month|media\s+type|type|tags?|favorite|favourite|starred)\b/.test(
+      normalized,
+    ) ||
+    /\b(?:from|to)\s+(?:a\s+)?(?:folder|directory)\b/.test(normalized)
+  ) {
+    return false;
+  }
+  if (parseVisualRequest(goal)) return true;
+  return (
+    /\b(images?|photos?|photographs?|pictures?|screenshots?|artwork|graphics?)\b/.test(
+      normalized,
+    ) &&
+    /\b(identify|find|discover|detect|classify|categorize|categorise|move|organize|organise|sort|group|containing|showing|depicting|of|with)\b/.test(
+      normalized,
+    )
+  );
 }
 
 function selectPriorityCategory(scores, categoryCount) {
@@ -104,15 +224,19 @@ function createVisualOrganizationPlan(request, analyzedAssets, stats) {
   const items = analyzedAssets
     .map(({ asset, categoryIndex, confidence }) => {
       const category = request.categories[categoryIndex];
+      const destinationFolder = category.explicitDestination
+        ? safeSegment(category.name)
+        : path.join("Organized", safeSegment(category.name));
       return {
         id: randomUUID(),
         assetId: asset.id,
         name: asset.name,
         sourceRelative: asset.relativePath,
-        targetRelative: path.join("Organized", safeSegment(category.name), asset.name),
-        reason: `Matched "${category.name}" with ${Math.round(confidence * 100)}% confidence; priority ${categoryIndex + 1}.`,
+        targetRelative: path.join(destinationFolder, asset.name),
+        reason: `Matched "${category.query}" for destination "${category.name}" with ${Math.round(confidence * 100)}% confidence; priority ${categoryIndex + 1}.`,
         confidence,
         category: category.name,
+        registerCategory: category.explicitDestination,
       };
     })
     .filter(
@@ -130,7 +254,7 @@ function createVisualOrganizationPlan(request, analyzedAssets, stats) {
   return {
     id: randomUUID(),
     visual: true,
-    interpretation: `images classified locally in priority order: ${request.categories.map((category) => category.name).join(" → ")}`,
+    interpretation: `images classified by ${stats.modelName || "the selected vision model"} in priority order: ${request.categories.map((category) => (category.query.toLocaleLowerCase() === category.name.toLocaleLowerCase() ? category.name : `${category.query} → ${category.name}`)).join("; then ")}`,
     summary: `Prepared ${items.length.toLocaleString()} reviewed move${items.length === 1 ? "" : "s"} from ${stats.total.toLocaleString()} images. ${uncertain.toLocaleString()} uncertain and ${stats.failed.toLocaleString()} unreadable image${stats.failed === 1 ? "" : "s"} will stay in place.${categorySummary ? ` ${categorySummary}.` : ""}`,
     items,
     analysis: {
@@ -174,7 +298,7 @@ function createOrganizationPlan(goal, assets, metadataByPath) {
 
   if ((parseVisualRequest(goal) || visualConcepts.length > 0) && !byTag) {
     throw new Error(
-      `Visual-content analysis is not available yet, so I cannot identify ${visualConcepts.join(", ")}. No plan was created. This planner currently uses file dates, media types, existing local tags, and favorites.`,
+      `I found a visual request for ${visualConcepts.join(", ")}, but could not extract usable categories. Use a category name in prose or list categories with bullets.`,
     );
   }
   if (!byYear && !byType && !byTag && !byFavorite) {
@@ -244,7 +368,9 @@ function createOrganizationPlan(goal, assets, metadataByPath) {
 
 module.exports = {
   createOrganizationPlan,
+  createVisualRequestFromMappings,
   createVisualOrganizationPlan,
+  looksLikeVisualRequest,
   parseVisualRequest,
   safeSegment,
   selectPriorityCategory,

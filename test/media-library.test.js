@@ -29,6 +29,22 @@ test("scans supported media recursively and ignores other files", async (context
   assert.equal(snapshot.assets.some((item) => Object.hasOwn(item, "absolutePath")), false);
 });
 
+test("uses converted previews for browser-unsupported image formats", async (context) => {
+  const rootPath = await fs.mkdtemp(path.join(os.tmpdir(), "local-content-preview-"));
+  context.after(() => fs.rm(rootPath, { recursive: true, force: true }));
+  await fs.writeFile(path.join(rootPath, "photo.heic"), "fixture");
+  await fs.writeFile(path.join(rootPath, "photo.jpg"), "fixture");
+
+  const library = new MediaLibrary();
+  const snapshot = await library.scan(rootPath);
+  const heic = snapshot.assets.find((item) => item.extension === ".heic");
+  const jpeg = snapshot.assets.find((item) => item.extension === ".jpg");
+
+  assert.match(heic.previewUrl, /^local-thumb:/);
+  assert.equal(heic.previewUrl, heic.thumbnailUrl);
+  assert.equal(jpeg.previewUrl, jpeg.mediaUrl);
+});
+
 test("moves without overwriting an existing destination", async (context) => {
   const rootPath = await fs.mkdtemp(path.join(os.tmpdir(), "local-content-move-"));
   context.after(() => fs.rm(rootPath, { recursive: true, force: true }));

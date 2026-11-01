@@ -6,6 +6,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const MAX_MEDIA_FILES = 100_000;
+const CONVERTED_PREVIEW_EXTENSIONS = new Set([".heic", ".heif", ".tif", ".tiff"]);
 const EXTENSIONS = new Map([
   [".jpg", "image"],
   [".jpeg", "image"],
@@ -110,6 +111,10 @@ class MediaLibrary {
           createdAt: stats.birthtime.toISOString(),
           mediaUrl: `local-media://asset/${id}`,
           thumbnailUrl: type === "image" ? `local-thumb://asset/${id}` : null,
+          previewUrl:
+            type === "image" && CONVERTED_PREVIEW_EXTENSIONS.has(extension)
+              ? `local-thumb://asset/${id}`
+              : `local-media://asset/${id}`,
           absolutePath,
         });
       }

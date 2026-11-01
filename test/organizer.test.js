@@ -5,7 +5,9 @@ const test = require("node:test");
 
 const {
   createOrganizationPlan,
+  createVisualRequestFromMappings,
   createVisualOrganizationPlan,
+  looksLikeVisualRequest,
   parseVisualRequest,
   safeSegment,
   selectPriorityCategory,
@@ -48,7 +50,7 @@ test("rejects an open-ended goal instead of inventing an organization rule", () 
   );
 });
 
-test("rejects visual classification instead of moving everything to Untagged", () => {
+test("keeps visual classification out of the metadata-only planner", () => {
   const prompt = `Let's organize images into categories using a priority order of:
 - images of people
 - images with text
@@ -58,7 +60,7 @@ test("rejects visual classification instead of moving everything to Untagged", (
 
   assert.throws(
     () => createOrganizationPlan(prompt, [asset], {}),
-    /Visual-content analysis is not available yet/,
+    /found a visual request/,
   );
 });
 
@@ -75,6 +77,89 @@ test("parses ordered visual categories into local classifier prompts", () => {
     ["People", "Text", "Cartoons or Comics", "Memes or Internet Images", "Reactions"],
   );
   assert.equal(request.labels.length, 6);
+});
+
+test("parses a single visual category on a later prompt", () => {
+  const request = parseVisualRequest("Organize the remaining images of people");
+
+  assert.deepEqual(request.categories.map((category) => category.name), ["People"]);
+  assert.equal(request.labels.length, 2);
+});
+
+test("preserves category priority expressed in prose", () => {
+  const request = parseVisualRequest(
+    "First reactions, then people, and finally images with text.",
+  );
+
+  assert.deepEqual(
+    request.categories.map((category) => category.name),
+    ["Reactions", "People", "Text"],
+  );
+});
+
+test("does not mistake metadata-only image prompts for visual classification", () => {
+  assert.equal(parseVisualRequest("Organize images by year"), null);
+});
+
+test("parses arbitrary visual query-to-folder mappings from bullets", () => {
+  const request = parseVisualRequest(`Let's move:
+- screenshots to "Blue Prince"
+- pictures of food to "Food"`);
+
+  assert.deepEqual(
+    request.categories.map(({ name, prompt }) => ({ name, prompt })),
+    [
+      { name: "Blue Prince", prompt: "a screenshot" },
+      { name: "Food", prompt: "a photograph of food" },
+    ],
+  );
+});
+
+test("parses a single natural-language visual move command", () => {
+  const request = parseVisualRequest("move all photos of babies to 'People'");
+
+  assert.equal(request.categories.length, 1);
+  assert.equal(request.categories[0].name, "People");
+  assert.equal(request.categories[0].prompt, "a photograph of babies");
+  assert.equal(request.categories[0].query, "photos of babies");
+});
+
+test("uses the requested destination folder in a visual plan", () => {
+  const request = parseVisualRequest("move all photos of babies to 'People'");
+  const plan = createVisualOrganizationPlan(
+    request,
+    [{ asset, categoryIndex: 0, confidence: 0.88 }],
+    { total: 1, failed: 0 },
+  );
+
+  assert.equal(
+    plan.items[0].targetRelative,
+    ["People", "beach.jpg"].join(require("node:path").sep),
+  );
+  assert.match(plan.items[0].reason, /photos of babies.*destination "People".*88%/);
+});
+
+test("detects arbitrary visual natural language without misrouting metadata prompts", () => {
+  assert.equal(
+    looksLikeVisualRequest(
+      'Identify and move images that are photographs of the video game "Blue Prince"',
+    ),
+    true,
+  );
+  assert.equal(looksLikeVisualRequest("Organize images by year"), false);
+  assert.equal(looksLikeVisualRequest("Move images from folder A to folder B"), false);
+});
+
+test("creates a visual request from GPT-interpreted mappings", () => {
+  const request = createVisualRequestFromMappings([
+    {
+      visualQuery: "photographs of the video game Blue Prince",
+      destinationFolder: "Blue Prince",
+    },
+  ]);
+
+  assert.equal(request.categories[0].name, "Blue Prince");
+  assert.match(request.categories[0].prompt, /video game Blue Prince/);
 });
 
 test("uses priority order when category scores are close", () => {

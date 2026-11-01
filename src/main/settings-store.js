@@ -4,9 +4,15 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 class SettingsStore {
-  constructor(filePath) {
+  constructor(filePath, auditFilePath) {
     this.filePath = filePath;
-    this.value = { mediaRoot: null, recycleBinRoot: null };
+    this.auditFilePath = auditFilePath;
+    this.value = {
+      mediaRoot: null,
+      recycleBinRoot: null,
+      visionModel: null,
+      visionConcurrency: 4,
+    };
     this.writeQueue = Promise.resolve();
   }
 
@@ -16,6 +22,10 @@ class SettingsStore {
       this.value = {
         mediaRoot: typeof parsed.mediaRoot === "string" ? parsed.mediaRoot : null,
         recycleBinRoot: typeof parsed.recycleBinRoot === "string" ? parsed.recycleBinRoot : null,
+        visionModel: typeof parsed.visionModel === "string" ? parsed.visionModel : null,
+        visionConcurrency: [1, 2, 4, 8].includes(parsed.visionConcurrency)
+          ? parsed.visionConcurrency
+          : 4,
       };
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -27,15 +37,45 @@ class SettingsStore {
     return { ...this.value };
   }
 
-  async setMediaRoot(mediaRoot) {
-    this.value.mediaRoot = mediaRoot;
-    await this.#save();
-    return this.get();
-  }
+  async commitUserSelection(field, value, source) {
+    const allowedSources = {
+      mediaRoot: "media-folder-picker",
+      recycleBinRoot: value === null ? "confirmed-recycle-clear" : "recycle-folder-picker",
+      visionModel: "model-picker",
+      visionConcurrency: "concurrency-picker",
+    };
+    if (!Object.hasOwn(allowedSources, field) || source !== allowedSources[field]) {
+      throw new Error("Settings can only be changed through a confirmed user settings action.");
+    }
+    if (
+      field !== "visionModel" &&
+      field !== "visionConcurrency" &&
+      value !== null &&
+      (typeof value !== "string" || !path.isAbsolute(value))
+    ) {
+      throw new Error("A selected settings folder must be an absolute path.");
+    }
+    if (
+      field === "visionModel" &&
+      (typeof value !== "string" || !value.trim() || value.length > 200)
+    ) {
+      throw new Error("A selected vision model must be a valid model identifier.");
+    }
+    if (field === "visionConcurrency" && ![1, 2, 4, 8].includes(value)) {
+      throw new Error("Vision concurrency must be 1, 2, 4, or 8.");
+    }
 
-  async setRecycleBinRoot(recycleBinRoot) {
-    this.value.recycleBinRoot = recycleBinRoot;
+    const previousValue = this.value[field];
+    if (previousValue === value) return this.get();
+    this.value[field] = value;
     await this.#save();
+    await this.#appendAudit({
+      timestamp: new Date().toISOString(),
+      field,
+      source,
+      previousValue,
+      value,
+    });
     return this.get();
   }
 
@@ -48,6 +88,14 @@ class SettingsStore {
       await fs.rename(temporaryPath, this.filePath);
     });
     return this.writeQueue;
+  }
+
+  async #appendAudit(event) {
+    await fs.mkdir(path.dirname(this.auditFilePath), { recursive: true });
+    await fs.appendFile(this.auditFilePath, `${JSON.stringify(event)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
   }
 }
 

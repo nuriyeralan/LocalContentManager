@@ -9,6 +9,7 @@ const elements = {
   recyclePath: document.getElementById("recycle-path"),
   chooseRecycle: document.getElementById("choose-recycle"),
   clearRecycle: document.getElementById("clear-recycle"),
+  categoryView: document.getElementById("category-view"),
   rescan: document.getElementById("rescan"),
   search: document.getElementById("search"),
   viewTitle: document.getElementById("view-title"),
@@ -29,6 +30,8 @@ const elements = {
   detailsDialog: document.getElementById("details-dialog"),
   detailsForm: document.getElementById("details-form"),
   detailsPreview: document.getElementById("details-preview"),
+  previousImage: document.getElementById("previous-image"),
+  nextImage: document.getElementById("next-image"),
   detailsType: document.getElementById("details-type"),
   detailsName: document.getElementById("details-name"),
   detailsPath: document.getElementById("details-path"),
@@ -38,9 +41,25 @@ const elements = {
   detailsFavorite: document.getElementById("details-favorite"),
   revealFile: document.getElementById("reveal-file"),
   deleteFile: document.getElementById("delete-file"),
+  detailsCategories: document.getElementById("details-categories"),
+  newCategoryName: document.getElementById("new-category-name"),
+  newCategoryDescription: document.getElementById("new-category-description"),
+  draftCategoryDescription: document.getElementById("draft-category-description"),
+  createCategory: document.getElementById("create-category"),
+  recommendCategory: document.getElementById("recommend-category"),
+  categoryRecommendation: document.getElementById("category-recommendation"),
+  categoryRecommendationText: document.getElementById("category-recommendation-text"),
+  applyRecommendation: document.getElementById("apply-recommendation"),
   organizerDialog: document.getElementById("organizer-dialog"),
   openOrganizer: document.getElementById("open-organizer"),
   closeOrganizer: document.getElementById("close-organizer"),
+  visionModel: document.getElementById("vision-model"),
+  visionConcurrency: document.getElementById("vision-concurrency"),
+  visionModelStatus: document.getElementById("vision-model-status"),
+  analysisProgress: document.getElementById("analysis-progress"),
+  analysisProgressBar: document.getElementById("analysis-progress-bar"),
+  analysisProgressCount: document.getElementById("analysis-progress-count"),
+  analysisProgressEta: document.getElementById("analysis-progress-eta"),
   goalForm: document.getElementById("goal-form"),
   goal: document.getElementById("goal"),
   goalStatus: document.getElementById("goal-status"),
@@ -56,14 +75,23 @@ const elements = {
 
 const state = {
   rootPath: null,
+  configuredMediaRoot: null,
   assets: [],
   metadata: {},
+  categories: [],
+  categoryFilter: null,
   recycleBinRoot: null,
   filter: "all",
   search: "",
   selectedAssetId: null,
+  previewAssetIds: [],
+  previewIndex: -1,
+  categoryRecommendation: null,
+  categoryRecommendationStatus: null,
+  categoryRecommendations: new Map(),
   plan: null,
   selectedPlanItemIds: new Set(),
+  visionModelsLoaded: false,
   busy: false,
 };
 
@@ -119,6 +147,17 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 ** unit).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.round(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
 function typeLabel(type) {
   return { image: "Photo", video: "Video", audio: "Audio" }[type] ?? "Media";
 }
@@ -126,11 +165,20 @@ function typeLabel(type) {
 function createPreview(asset, detailed = false) {
   if (asset.type === "image") {
     const image = document.createElement("img");
-    image.src = detailed ? asset.mediaUrl : asset.thumbnailUrl;
+    image.src = detailed ? asset.previewUrl || asset.mediaUrl : asset.thumbnailUrl;
     image.alt = detailed ? asset.name : "";
     image.loading = "lazy";
     image.decoding = "async";
     image.fetchPriority = detailed ? "high" : "low";
+    if (detailed && asset.thumbnailUrl && asset.previewUrl !== asset.thumbnailUrl) {
+      image.addEventListener(
+        "error",
+        () => {
+          image.src = asset.thumbnailUrl;
+        },
+        { once: true },
+      );
+    }
     return image;
   }
   if (asset.type === "video") {
@@ -163,12 +211,17 @@ function createPreview(asset, detailed = false) {
 function filteredAssets() {
   const query = state.search.trim().toLocaleLowerCase();
   return state.assets.filter((asset) => {
+    const segments = asset.relativePath.split(/[\\/]/);
+    const categoryMatches = state.categoryFilter
+      ? segments.length > 1 &&
+        segments[0].toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase()
+      : segments.length === 1;
     const metadata = metadataFor(asset);
     const typeMatches =
       state.filter === "all" ||
       asset.type === state.filter ||
       (state.filter === "favorite" && metadata.favorite);
-    if (!typeMatches) return false;
+    if (!categoryMatches || !typeMatches) return false;
     if (!query) return true;
     return [asset.name, asset.relativePath, ...(metadata.tags ?? [])]
       .join(" ")
@@ -178,8 +231,15 @@ function filteredAssets() {
 }
 
 function updateCounts() {
-  const counts = { all: state.assets.length, image: 0, video: 0, audio: 0, favorite: 0 };
-  for (const asset of state.assets) {
+  const scopedAssets = state.assets.filter((asset) => {
+    const segments = asset.relativePath.split(/[\\/]/);
+    return state.categoryFilter
+      ? segments.length > 1 &&
+          segments[0].toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase()
+      : segments.length === 1;
+  });
+  const counts = { all: scopedAssets.length, image: 0, video: 0, audio: 0, favorite: 0 };
+  for (const asset of scopedAssets) {
     counts[asset.type] += 1;
     if (metadataFor(asset).favorite) counts.favorite += 1;
   }
@@ -190,6 +250,7 @@ function renderCard(asset) {
   const metadata = metadataFor(asset);
   const card = document.createElement("div");
   card.className = "media-card";
+  card.dataset.assetId = asset.id;
   card.role = "button";
   card.tabIndex = 0;
   card.addEventListener("click", () => openDetails(asset.id));
@@ -203,10 +264,24 @@ function renderCard(asset) {
   thumbnail.className = "thumb";
   thumbnail.appendChild(createPreview(asset));
 
+  const chips = document.createElement("div");
+  chips.className = "thumb-chips";
   const type = document.createElement("span");
   type.className = "type-chip";
   type.textContent = typeLabel(asset.type);
-  thumbnail.appendChild(type);
+  chips.appendChild(type);
+  const recommendation =
+    state.categoryRecommendations.get(asset.id)?.status === "ready"
+      ? state.categoryRecommendations.get(asset.id).recommendation
+      : null;
+  if (recommendation?.categoryName) {
+    const recommendationChip = document.createElement("span");
+    recommendationChip.className = "recommendation-chip";
+    recommendationChip.textContent = recommendation.categoryName;
+    recommendationChip.title = `${Math.round(recommendation.confidence * 100)}% · ${recommendation.reason || "AI recommendation"}`;
+    chips.appendChild(recommendationChip);
+  }
+  thumbnail.appendChild(chips);
   if (metadata.favorite) {
     const favorite = document.createElement("span");
     favorite.className = "favorite-star";
@@ -333,9 +408,11 @@ function render() {
   elements.rescan.disabled = !hasLibrary || state.busy;
   elements.openOrganizer.disabled = !hasLibrary || state.assets.length === 0 || state.busy;
   elements.rootName.textContent = hasLibrary
-    ? state.rootPath.split(/[\\/]/).filter(Boolean).at(-1)
+    ? state.configuredMediaRoot.split(/[\\/]/).filter(Boolean).at(-1)
     : "No folder selected";
-  elements.rootPath.textContent = hasLibrary ? state.rootPath : "Choose a folder to begin.";
+  elements.rootPath.textContent = hasLibrary
+    ? state.configuredMediaRoot
+    : "Choose a folder to begin.";
   const hasRecycleBin = Boolean(state.recycleBinRoot);
   elements.recycleName.textContent = hasRecycleBin
     ? state.recycleBinRoot.split(/[\\/]/).filter(Boolean).at(-1)
@@ -349,9 +426,12 @@ function render() {
   updateCounts();
   const visible = filteredAssets();
   const titles = { all: "All media", image: "Photos", video: "Videos", audio: "Audio", favorite: "Favorites" };
-  elements.viewTitle.textContent = titles[state.filter];
-  elements.resultSummary.textContent = `${visible.length.toLocaleString()} of ${state.assets.length.toLocaleString()} items`;
-  elements.librarySize.textContent = formatBytes(state.assets.reduce((sum, asset) => sum + asset.size, 0));
+  elements.viewTitle.textContent = state.categoryFilter
+    ? `${state.categoryFilter} · ${titles[state.filter]}`
+    : `Unsorted · ${titles[state.filter]}`;
+  const scopedCount = Number(elements.counts.all.textContent.replaceAll(",", "")) || 0;
+  elements.resultSummary.textContent = `${visible.length.toLocaleString()} of ${scopedCount.toLocaleString()} items`;
+  elements.librarySize.textContent = formatBytes(visible.reduce((sum, asset) => sum + asset.size, 0));
   elements.emptyResults.classList.toggle("hidden", visible.length > 0);
   virtualGrid.assets = visible;
   scheduleVirtualGridRender(true);
@@ -360,8 +440,45 @@ function render() {
 
 function setLibrary(nextState) {
   state.rootPath = nextState.rootPath;
+  state.configuredMediaRoot = nextState.configuredMediaRoot ?? nextState.rootPath;
   state.assets = nextState.assets ?? [];
   state.metadata = nextState.metadata ?? {};
+  const nextCategories = nextState.categories ?? [];
+  if (JSON.stringify(state.categories) !== JSON.stringify(nextCategories)) {
+    state.categoryRecommendations.clear();
+  }
+  state.categories = nextCategories;
+  if (
+    state.categoryFilter &&
+    !state.categories.some(
+      (category) =>
+        category.name.toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase(),
+    )
+  ) {
+    state.categoryFilter = null;
+  }
+  elements.categoryView.replaceChildren();
+  const unsortedCount = state.assets.filter(
+    (asset) => asset.relativePath.split(/[\\/]/).length === 1,
+  ).length;
+  const unsorted = document.createElement("option");
+  unsorted.value = "";
+  unsorted.textContent = `Unsorted (${unsortedCount.toLocaleString()})`;
+  elements.categoryView.appendChild(unsorted);
+  for (const category of state.categories) {
+    const categoryCount = state.assets.filter((asset) => {
+      const segments = asset.relativePath.split(/[\\/]/);
+      return (
+        segments.length > 1 &&
+        segments[0].toLocaleLowerCase() === category.name.toLocaleLowerCase()
+      );
+    }).length;
+    const option = document.createElement("option");
+    option.value = category.name;
+    option.textContent = `${category.name} (${categoryCount.toLocaleString()})`;
+    elements.categoryView.appendChild(option);
+  }
+  elements.categoryView.value = state.categoryFilter ?? "";
   state.recycleBinRoot = nextState.recycleBinRoot ?? null;
   state.plan = null;
   renderPlan();
@@ -388,15 +505,14 @@ async function chooseRecycleBin() {
 
 async function clearRecycleBin() {
   if (state.busy) return;
-  const approved = confirm(
-    "Use permanent deletion instead? Deleted media will no longer be recoverable through LocalContentManager.",
-  );
-  if (!approved) return;
   state.busy = true;
   render();
   try {
-    setLibrary(requireSuccess(await api.clearRecycleBin()));
-    showToast("Recycling folder cleared. Future deletions will be permanent.");
+    const result = requireSuccess(await api.clearRecycleBin());
+    if (result) {
+      setLibrary(result);
+      showToast("Recycling folder cleared. Future deletions will be permanent.");
+    }
   } catch (error) {
     showToast(error.message, true);
   } finally {
@@ -440,9 +556,121 @@ async function rescan() {
   }
 }
 
-function openDetails(assetId) {
+function previewIndexFrom(startIndex, direction) {
+  for (
+    let index = startIndex;
+    index >= 0 && index < state.previewAssetIds.length;
+    index += direction
+  ) {
+    if (state.assets.some((asset) => asset.id === state.previewAssetIds[index])) return index;
+  }
+  return -1;
+}
+
+function renderDetailsCategories() {
+  elements.detailsCategories.replaceChildren();
+  if (state.categories.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "category-empty";
+    empty.textContent = "No categories yet. Create one below.";
+    elements.detailsCategories.appendChild(empty);
+    return;
+  }
+  for (const category of state.categories) {
+    const item = document.createElement("div");
+    item.className = "category-item";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "category-button";
+    if (state.categoryRecommendation?.categoryName === category.name) {
+      button.classList.add("recommended");
+    }
+    button.textContent = category.name;
+    button.title = category.description || "No description";
+    button.addEventListener("click", () =>
+      assignSelectedAssetToCategory(category.name),
+    );
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "category-edit";
+    edit.textContent = "✎";
+    edit.title = `Edit ${category.name} description`;
+    edit.addEventListener("click", () => editCategoryDescription(category));
+    item.append(button, edit);
+    elements.detailsCategories.appendChild(item);
+  }
+}
+
+function renderCategoryRecommendation() {
+  const status = state.categoryRecommendationStatus;
+  if (state.categories.length === 0 || !status) {
+    elements.categoryRecommendation.classList.add("hidden");
+    elements.recommendCategory.disabled = state.categories.length === 0;
+    return;
+  }
+  elements.categoryRecommendation.classList.remove("hidden");
+  if (status.status === "analyzing") {
+    elements.categoryRecommendationText.textContent =
+      "AI is analyzing this image against the available categories…";
+    elements.applyRecommendation.disabled = true;
+  } else if (status.status === "error") {
+    elements.categoryRecommendationText.textContent = status.error;
+    elements.applyRecommendation.disabled = true;
+  } else {
+    const recommendation = status.recommendation;
+    elements.applyRecommendation.disabled = !recommendation.categoryName;
+    elements.categoryRecommendationText.textContent = recommendation.categoryName
+      ? `${recommendation.categoryName} · ${Math.round(recommendation.confidence * 100)}% · ${recommendation.reason || "Recommended by the selected model."}`
+      : `${recommendation.modelName} did not find a clear matching category.`;
+  }
+}
+
+function schedulePreviewRecommendations(forceCurrent = false) {
+  const asset = state.assets.find((item) => item.id === state.selectedAssetId);
+  if (!asset || asset.type !== "image" || state.categories.length === 0) {
+    state.categoryRecommendation = null;
+    state.categoryRecommendationStatus = null;
+    renderCategoryRecommendation();
+    return;
+  }
+  const assetIds = [];
+  for (
+    let index = state.previewIndex;
+    index < state.previewAssetIds.length && assetIds.length < 25;
+    index += 1
+  ) {
+    const candidate = state.assets.find(
+      (item) => item.id === state.previewAssetIds[index],
+    );
+    if (candidate?.type === "image") assetIds.push(candidate.id);
+  }
+  const existing = forceCurrent
+    ? null
+    : state.categoryRecommendations.get(asset.id);
+  state.categoryRecommendationStatus = existing ?? { status: "analyzing" };
+  state.categoryRecommendation =
+    state.categoryRecommendationStatus.status === "ready"
+      ? state.categoryRecommendationStatus.recommendation
+      : null;
+  renderDetailsCategories();
+  renderCategoryRecommendation();
+  api
+    .precomputeCategoryRecommendations(assetIds, forceCurrent)
+    .then(requireSuccess)
+    .catch((error) => {
+      state.categoryRecommendationStatus = {
+        status: "error",
+        error: error.message,
+      };
+      renderCategoryRecommendation();
+    });
+}
+
+function showDetailsAsset(assetId) {
   const asset = state.assets.find((item) => item.id === assetId);
   if (!asset) return;
+  const index = state.previewAssetIds.indexOf(assetId);
+  if (index !== -1) state.previewIndex = index;
   const metadata = metadataFor(asset);
   state.selectedAssetId = assetId;
   elements.detailsPreview.replaceChildren(createPreview(asset, true));
@@ -453,25 +681,148 @@ function openDetails(assetId) {
   elements.detailsDate.textContent = new Date(asset.modifiedAt).toLocaleString();
   elements.detailsTags.value = (metadata.tags ?? []).join(", ");
   elements.detailsFavorite.checked = metadata.favorite === true;
+  renderDetailsCategories();
+  schedulePreviewRecommendations();
+  elements.previousImage.disabled = previewIndexFrom(state.previewIndex - 1, -1) === -1;
+  elements.nextImage.disabled = previewIndexFrom(state.previewIndex + 1, 1) === -1;
+}
+
+function openDetails(assetId) {
+  state.previewAssetIds = filteredAssets().map((asset) => asset.id);
+  state.previewIndex = state.previewAssetIds.indexOf(assetId);
+  showDetailsAsset(assetId);
   elements.detailsDialog.showModal();
 }
 
-async function deleteAsset(assetId) {
+function navigateDetails(direction) {
+  const index = previewIndexFrom(state.previewIndex + direction, direction);
+  if (index === -1) return;
+  state.previewIndex = index;
+  showDetailsAsset(state.previewAssetIds[index]);
+}
+
+function previewAssetIdInDirection(direction) {
+  const index = previewIndexFrom(state.previewIndex + direction, direction);
+  return index === -1 ? null : state.previewAssetIds[index];
+}
+
+function advanceDetails(nextAssetId) {
+  if (nextAssetId && state.assets.some((asset) => asset.id === nextAssetId)) {
+    showDetailsAsset(nextAssetId);
+  } else {
+    elements.detailsDialog.close();
+    state.selectedAssetId = null;
+  }
+}
+
+async function assignSelectedAssetToCategory(
+  category,
+  description = "",
+  advanceDirection = 1,
+) {
+  if (state.busy) return;
+  const asset = state.assets.find((item) => item.id === state.selectedAssetId);
+  if (!asset) return;
+  const nextAssetId = previewAssetIdInDirection(advanceDirection);
+  state.busy = true;
+  elements.detailsCategories.querySelectorAll("button").forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    const result = requireSuccess(
+      await api.assignCategory(asset.id, category, description),
+    );
+    setLibrary(result.state);
+    elements.newCategoryName.value = "";
+    elements.newCategoryDescription.value = "";
+    showToast(`Moved "${asset.name}" to ${result.category.name}.`);
+    advanceDetails(nextAssetId);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    state.busy = false;
+    render();
+    if (elements.detailsDialog.open) renderDetailsCategories();
+  }
+}
+
+async function editCategoryDescription(category) {
+  const description = prompt(
+    `Description for "${category.name}"`,
+    category.description,
+  );
+  if (description === null) return;
+  try {
+    const result = requireSuccess(
+      await api.updateCategoryDescription(category.name, description),
+    );
+    setLibrary(result.state);
+    if (elements.detailsDialog.open) schedulePreviewRecommendations();
+    showToast(`Updated ${category.name}.`);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function recommendSelectedCategory() {
+  schedulePreviewRecommendations(true);
+}
+
+async function draftNewCategoryDescription() {
+  if (state.busy) return;
+  const asset = state.assets.find((item) => item.id === state.selectedAssetId);
+  if (!asset) return;
+  const category = elements.newCategoryName.value.trim();
+  if (!category) {
+    showToast("Enter a category name before asking AI to draft its description.", true);
+    elements.newCategoryName.focus();
+    return;
+  }
+  state.busy = true;
+  elements.draftCategoryDescription.disabled = true;
+  elements.draftCategoryDescription.textContent = "Drafting…";
+  try {
+    const result = requireSuccess(
+      await api.draftCategoryDescription(asset.id, category),
+    );
+    elements.newCategoryDescription.value = result.description;
+    elements.newCategoryDescription.focus();
+    showToast(`Drafted with ${result.modelName}. Review or edit before creating.`);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    state.busy = false;
+    elements.draftCategoryDescription.disabled = false;
+    elements.draftCategoryDescription.textContent = "Draft with AI";
+  }
+}
+
+async function deleteAsset(assetId, { advance = false, requireRecycle = false } = {}) {
   if (state.busy) return;
   const asset = state.assets.find((item) => item.id === assetId);
   if (!asset) return;
-  const action = state.recycleBinRoot
-    ? `Move "${asset.name}" to the recycling folder using its current relative path?`
-    : `Permanently delete "${asset.name}" from disk? This cannot be undone.`;
-  if (!confirm(action)) return;
+  if (requireRecycle && !state.recycleBinRoot) {
+    showToast("Configure a recycling folder before using Delete in the preview.", true);
+    return;
+  }
+  if (
+    !state.recycleBinRoot &&
+    !confirm(`Permanently delete "${asset.name}" from disk? This cannot be undone.`)
+  ) {
+    return;
+  }
 
+  const nextAssetId = advance ? previewAssetIdInDirection(1) : null;
   state.busy = true;
   render();
   try {
     const result = requireSuccess(await api.deleteAsset(asset.id));
     setLibrary(result.state);
-    if (elements.detailsDialog.open) elements.detailsDialog.close();
-    state.selectedAssetId = null;
+    if (elements.detailsDialog.open) {
+      if (advance) advanceDetails(nextAssetId);
+      else elements.detailsDialog.close();
+    }
+    if (!elements.detailsDialog.open) state.selectedAssetId = null;
     showToast(
       result.mode === "recycled"
         ? `"${asset.name}" moved to the recycling folder.`
@@ -608,6 +959,11 @@ async function buildPlan(event) {
   event.preventDefault();
   if (state.busy) return;
   state.busy = true;
+  render();
+  elements.analysisProgress.classList.add("hidden");
+  elements.analysisProgressBar.value = 0;
+  elements.analysisProgressCount.textContent = "Preparing analysis…";
+  elements.analysisProgressEta.textContent = "";
   state.plan = null;
   renderPlan();
   elements.goalStatus.className = "goal-status";
@@ -625,12 +981,64 @@ async function buildPlan(event) {
     renderPlan();
     elements.goalStatus.className = "goal-status error";
     elements.goalStatus.textContent = `No plan created. ${error.message}`;
+    if (!elements.analysisProgress.classList.contains("hidden")) {
+      elements.analysisProgressEta.textContent = "Stopped";
+    }
     showToast(error.message, true);
   } finally {
     state.busy = false;
     elements.cancelAnalysis.classList.add("hidden");
     elements.goalForm.querySelector('button[type="submit"]').disabled = false;
     updatePlanSelection();
+    render();
+  }
+}
+
+async function loadVisionModels(force = false) {
+  if (state.visionModelsLoaded && !force) return;
+  elements.visionModel.disabled = true;
+  elements.visionModelStatus.textContent = "Loading models available to your Copilot account…";
+  try {
+    const catalog = requireSuccess(await api.listVisionModels());
+    elements.visionConcurrency.value = String(catalog.concurrency ?? 4);
+    elements.visionModel.replaceChildren();
+    if (!catalog.auth?.isAuthenticated) {
+      elements.visionModelStatus.textContent =
+        catalog.auth?.statusMessage || "Sign in to GitHub Copilot to use visual analysis.";
+      return;
+    }
+    if (catalog.models.length === 0) {
+      elements.visionModelStatus.textContent =
+        "No vision-capable models are currently available to this Copilot account.";
+      return;
+    }
+    for (const model of catalog.models) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.name;
+      option.selected = model.id === catalog.selectedModel;
+      elements.visionModel.appendChild(option);
+    }
+    elements.visionModel.disabled = false;
+    state.visionModelsLoaded = true;
+    const selectedModel = catalog.models.find(
+      (model) => model.id === catalog.selectedModel,
+    );
+    if (catalog.configuredModel && catalog.configuredModel !== catalog.selectedModel) {
+      elements.visionModelStatus.textContent =
+        "Your previously selected model is unavailable; choose an available replacement.";
+    } else {
+      const effort = selectedModel?.supportedReasoningEfforts?.includes("none")
+        ? "None"
+        : selectedModel?.supportedReasoningEfforts?.includes("low")
+          ? "Low"
+          : "model default";
+      elements.visionModelStatus.textContent =
+        `${effort} reasoning · default context · ${catalog.concurrency ?? 4} maximum parallel sessions · Fast routing when provided by the model.`;
+    }
+  } catch (error) {
+    elements.visionModelStatus.textContent = error.message;
+    showToast(error.message, true);
   }
 }
 
@@ -643,6 +1051,7 @@ async function applyPlan() {
   if (!approved) return;
 
   state.busy = true;
+  render();
   updatePlanSelection();
   try {
     const result = requireSuccess(await api.applyPlan(state.plan.id, selected));
@@ -654,6 +1063,7 @@ async function applyPlan() {
   } finally {
     state.busy = false;
     updatePlanSelection();
+    render();
   }
 }
 
@@ -661,6 +1071,11 @@ elements.chooseFolder.addEventListener("click", chooseFolder);
 elements.welcomeChoose.addEventListener("click", chooseFolder);
 elements.chooseRecycle.addEventListener("click", chooseRecycleBin);
 elements.clearRecycle.addEventListener("click", clearRecycleBin);
+elements.categoryView.addEventListener("change", () => {
+  state.categoryFilter = elements.categoryView.value || null;
+  window.scrollTo({ top: 0, behavior: "auto" });
+  render();
+});
 elements.rescan.addEventListener("click", rescan);
 elements.search.addEventListener("input", () => {
   state.search = elements.search.value;
@@ -680,9 +1095,124 @@ elements.revealFile.addEventListener("click", async () => {
     showToast(error.message, true);
   }
 });
-elements.deleteFile.addEventListener("click", () => deleteAsset(state.selectedAssetId));
-elements.openOrganizer.addEventListener("click", () => elements.organizerDialog.showModal());
+elements.deleteFile.addEventListener("click", () =>
+  deleteAsset(state.selectedAssetId, { advance: elements.detailsDialog.open }),
+);
+elements.previousImage.addEventListener("click", () => navigateDetails(-1));
+elements.nextImage.addEventListener("click", () => navigateDetails(1));
+elements.createCategory.addEventListener("click", () => {
+  const category = elements.newCategoryName.value.trim();
+  if (!category) {
+    showToast("Enter a category name.", true);
+    return;
+  }
+  assignSelectedAssetToCategory(
+    category,
+    elements.newCategoryDescription.value.trim(),
+  );
+});
+elements.newCategoryName.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  elements.createCategory.click();
+});
+elements.newCategoryDescription.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  elements.createCategory.click();
+});
+elements.draftCategoryDescription.addEventListener(
+  "click",
+  draftNewCategoryDescription,
+);
+elements.recommendCategory.addEventListener("click", recommendSelectedCategory);
+elements.applyRecommendation.addEventListener("click", () => {
+  if (!state.categoryRecommendation?.categoryName) return;
+  assignSelectedAssetToCategory(state.categoryRecommendation.categoryName);
+});
+elements.detailsDialog.addEventListener("close", () => {
+  elements.detailsPreview.querySelectorAll("audio, video").forEach((media) => media.pause());
+  elements.detailsPreview.replaceChildren();
+  elements.newCategoryName.value = "";
+  elements.newCategoryDescription.value = "";
+  elements.categoryRecommendation.classList.add("hidden");
+  state.selectedAssetId = null;
+  state.previewAssetIds = [];
+  state.previewIndex = -1;
+  state.categoryRecommendation = null;
+  state.categoryRecommendationStatus = null;
+});
+document.addEventListener("keydown", (event) => {
+  if (!elements.detailsDialog.open) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    elements.detailsDialog.close();
+    return;
+  }
+  const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
+  if (editing) return;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    if (event.shiftKey && state.categoryRecommendation?.categoryName) {
+      assignSelectedAssetToCategory(
+        state.categoryRecommendation.categoryName,
+        "",
+        -1,
+      );
+    } else {
+      navigateDetails(-1);
+    }
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    if (event.shiftKey && state.categoryRecommendation?.categoryName) {
+      assignSelectedAssetToCategory(
+        state.categoryRecommendation.categoryName,
+        "",
+        1,
+      );
+    } else {
+      navigateDetails(1);
+    }
+  } else if (event.key === "Delete") {
+    event.preventDefault();
+    deleteAsset(state.selectedAssetId, { advance: true, requireRecycle: true });
+  }
+});
+elements.openOrganizer.addEventListener("click", () => {
+  elements.organizerDialog.showModal();
+  loadVisionModels(true);
+});
 elements.closeOrganizer.addEventListener("click", () => elements.organizerDialog.close());
+elements.visionModel.addEventListener("change", async () => {
+  elements.visionModel.disabled = true;
+  try {
+    requireSuccess(await api.setVisionModel(elements.visionModel.value));
+    state.categoryRecommendations.clear();
+    elements.visionModelStatus.textContent = "Vision model saved for future visual prompts.";
+  } catch (error) {
+    showToast(error.message, true);
+    state.visionModelsLoaded = false;
+    await loadVisionModels(true);
+  } finally {
+    elements.visionModel.disabled = !state.visionModelsLoaded;
+  }
+});
+elements.visionConcurrency.addEventListener("change", async () => {
+  const value = Number(elements.visionConcurrency.value);
+  elements.visionConcurrency.disabled = true;
+  try {
+    requireSuccess(await api.setVisionConcurrency(value));
+    state.visionModelsLoaded = false;
+    await loadVisionModels(true);
+    showToast(`Maximum parallel sessions set to ${value}.`);
+  } catch (error) {
+    showToast(error.message, true);
+    state.visionModelsLoaded = false;
+    await loadVisionModels(true);
+  } finally {
+    elements.visionConcurrency.disabled = false;
+  }
+});
 elements.goalForm.addEventListener("submit", buildPlan);
 elements.cancelAnalysis.addEventListener("click", async () => {
   elements.cancelAnalysis.disabled = true;
@@ -716,6 +1246,40 @@ elements.planItems.addEventListener("scroll", schedulePlanRender, { passive: tru
 api.onOrganizerProgress((progress) => {
   elements.goalStatus.className = "goal-status";
   elements.goalStatus.textContent = progress.message;
+  elements.analysisProgress.classList.remove("hidden");
+  if (progress.total > 0) {
+    elements.analysisProgressBar.max = progress.total;
+    elements.analysisProgressBar.value = Math.min(progress.current || 0, progress.total);
+  } else {
+    elements.analysisProgressBar.removeAttribute("value");
+  }
+  if (progress.total <= 0) {
+    elements.analysisProgressCount.textContent = "Interpreting visual command…";
+    elements.analysisProgressEta.textContent = "";
+    return;
+  }
+  const percent =
+    progress.total > 0 ? Math.round(((progress.current || 0) / progress.total) * 100) : 0;
+  elements.analysisProgressCount.textContent =
+    `${(progress.current || 0).toLocaleString()} of ${(progress.total || 0).toLocaleString()} · ${percent}% · ${progress.concurrency || 1} session${progress.concurrency === 1 ? "" : "s"}`;
+  if (progress.current >= progress.total && progress.total > 0) {
+    elements.analysisProgressEta.textContent = `Completed in ${formatDuration(progress.elapsedMs)}`;
+  } else {
+    elements.analysisProgressEta.textContent =
+      progress.etaMs == null
+        ? "Estimating time remaining…"
+        : `About ${formatDuration(progress.etaMs)} remaining`;
+  }
+});
+api.onCategoryRecommendation((payload) => {
+  state.categoryRecommendations.set(payload.assetId, payload);
+  scheduleVirtualGridRender(true);
+  if (payload.assetId !== state.selectedAssetId) return;
+  state.categoryRecommendationStatus = payload;
+  state.categoryRecommendation =
+    payload.status === "ready" ? payload.recommendation : null;
+  renderDetailsCategories();
+  renderCategoryRecommendation();
 });
 window.addEventListener("scroll", () => scheduleVirtualGridRender(), { passive: true });
 window.addEventListener("resize", () => scheduleVirtualGridRender(true));

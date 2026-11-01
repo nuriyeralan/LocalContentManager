@@ -15,18 +15,27 @@ const {
   shell,
 } = require("electron");
 
+const { CategoryStore, validateCategoryName } = require("./category-store");
 const { MediaLibrary, isWithin } = require("./media-library");
+const { guardBrokenPipe, LocalLogger } = require("./local-logger");
 const { MetadataStore } = require("./metadata-store");
 const {
   createOrganizationPlan,
   createVisualOrganizationPlan,
+  looksLikeVisualRequest,
   parseVisualRequest,
   selectPriorityCategory,
 } = require("./organizer");
+const { RecommendationStore } = require("./recommendation-store");
 const { SettingsStore } = require("./settings-store");
-const { VisionAnalyzer } = require("./vision-analyzer");
-const { MODEL_REVISION } = require("./vision-constants");
+const { normalizeConcurrency, VisionAnalyzer } = require("./vision-analyzer");
 const { requestKey, VisionStore } = require("./vision-store");
+const { productName } = require("../../package.json");
+
+const logger = new LocalLogger();
+guardBrokenPipe(process.stdout, logger, "stdout");
+guardBrokenPipe(process.stderr, logger, "stderr");
+app.setName(productName);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -51,6 +60,8 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow;
 let settings;
 let metadata;
+let categoryStore;
+let recommendationStore;
 let library;
 let activePlan;
 let activeScan;
@@ -58,10 +69,14 @@ let activeAnalysis = false;
 let analysisCancelled = false;
 let visionAnalyzer;
 let visionStore;
+let recommendationQueue = [];
+const queuedRecommendations = new Set();
+let recommendationWorkers = 0;
+let recommendationGeneration = 0;
 const thumbnailCache = new Map();
 const thumbnailJobs = new Map();
 const MAX_CACHED_THUMBNAILS = 250;
-const APP_TITLE = `LocalContentManager (${app.getVersion()})`;
+const APP_TITLE = `${productName} (${app.getVersion()})`;
 
 function clearThumbnailCache() {
   thumbnailCache.clear();
@@ -112,7 +127,7 @@ function handle(channel, action) {
       assertTrustedSender(event);
       return { ok: true, data: await action(...args) };
     } catch (error) {
-      console.error(`[ipc] ${channel} failed:`, error);
+      logger.error(`[ipc] ${channel} failed`, error);
       return { ok: false, error: error instanceof Error ? error.message : "The operation failed." };
     }
   });
@@ -122,6 +137,8 @@ function libraryState() {
   const snapshot = library.publicSnapshot();
   return {
     ...snapshot,
+    configuredMediaRoot: settings.get().mediaRoot,
+    categories: snapshot.rootPath ? categoryStore.list(snapshot.rootPath) : [],
     metadata: snapshot.rootPath ? metadata.list(snapshot.rootPath) : {},
     recycleBinRoot: settings.get().recycleBinRoot,
   };
@@ -134,106 +151,264 @@ function assertSeparateFolders(mediaRoot, recycleBinRoot) {
   }
 }
 
-async function prepareVisionImage(asset) {
-  const image = await nativeImage.createThumbnailFromPath(asset.absolutePath, {
-    width: 512,
-    height: 512,
+async function prepareVisionImage(asset, maxImageSize) {
+  let image = await nativeImage.createThumbnailFromPath(asset.absolutePath, {
+    width: 1280,
+    height: 1280,
   });
   if (image.isEmpty()) throw new Error(`Windows could not decode ${asset.name}.`);
-  const { width, height } = image.getSize();
-  const bitmap = image.toBitmap({ scaleFactor: 1 });
-  if (bitmap.length !== width * height * 4) {
-    throw new Error(`Windows returned an unexpected pixel format for ${asset.name}.`);
+  let jpeg = image.toJPEG(88);
+  while (
+    maxImageSize &&
+    jpeg.length > maxImageSize &&
+    Math.max(image.getSize().width, image.getSize().height) > 320
+  ) {
+    const size = image.getSize();
+    image = image.resize({
+      width: Math.max(320, Math.round(size.width * 0.75)),
+      height: Math.max(320, Math.round(size.height * 0.75)),
+      quality: "good",
+    });
+    jpeg = image.toJPEG(82);
   }
-
-  const pixels = new Uint8Array(bitmap.length);
-  for (let offset = 0; offset < bitmap.length; offset += 4) {
-    pixels[offset] = bitmap[offset + 2];
-    pixels[offset + 1] = bitmap[offset + 1];
-    pixels[offset + 2] = bitmap[offset];
-    pixels[offset + 3] = bitmap[offset + 3];
+  if (maxImageSize && jpeg.length > maxImageSize) {
+    throw new Error(`The resized copy of ${asset.name} exceeds the selected model's image limit.`);
   }
-  return { pixels, width, height };
+  return { base64: jpeg.toString("base64") };
 }
 
-async function createVisualPlan(request) {
+function invalidateRecommendationQueue() {
+  recommendationGeneration += 1;
+  recommendationQueue = [];
+  queuedRecommendations.clear();
+}
+
+function sendRecommendation(assetId, payload) {
+  send("categories:recommendation", { assetId, ...payload });
+}
+
+async function enqueueRecommendations(assetIds, force = false) {
+  if (!library.rootPath || !Array.isArray(assetIds)) return { queued: 0, cached: 0 };
+  const categories = categoryStore.list(library.rootPath);
+  if (categories.length === 0) return { queued: 0, cached: 0 };
+  const model = await visionAnalyzer.resolveModel(settings.get().visionModel);
+  const analysisKey = requestKey(
+    `recommend:${model.id}`,
+    categories.map((category) => `${category.name}\0${category.description}`),
+  );
+  const generation = recommendationGeneration;
+  let queued = 0;
+  let cached = 0;
+
+  for (const assetId of assetIds.slice(0, 30)) {
+    const asset = library.getAsset(assetId);
+    if (!asset || asset.type !== "image") continue;
+    const stored = force
+      ? null
+      : recommendationStore.get(library.rootPath, asset, analysisKey);
+    if (stored) {
+      cached += 1;
+      sendRecommendation(assetId, { status: "ready", recommendation: stored });
+      continue;
+    }
+    const queueKey = `${analysisKey}:${assetId}`;
+    if (queuedRecommendations.has(queueKey)) continue;
+    queuedRecommendations.add(queueKey);
+    recommendationQueue.push({
+      analysisKey,
+      assetId,
+      categories,
+      generation,
+      model,
+      queueKey,
+    });
+    queued += 1;
+  }
+  startRecommendationWorkers();
+  return { queued, cached };
+}
+
+function startRecommendationWorkers() {
+  const maximum = settings.get().visionConcurrency;
+  while (recommendationWorkers < maximum && recommendationQueue.length > 0) {
+    runRecommendationWorker();
+  }
+}
+
+async function runRecommendationWorker() {
+  recommendationWorkers += 1;
+  try {
+    while (recommendationQueue.length > 0) {
+      const job = recommendationQueue.shift();
+      queuedRecommendations.delete(job.queueKey);
+      if (job.generation !== recommendationGeneration) continue;
+      const asset = library.getAsset(job.assetId);
+      if (!asset) continue;
+      sendRecommendation(job.assetId, { status: "analyzing" });
+      try {
+        const image = await prepareVisionImage(asset, job.model.maxImageSize);
+        const recommendation = await visionAnalyzer.recommendCategory(
+          image,
+          job.categories,
+          job.model,
+        );
+        if (
+          job.generation !== recommendationGeneration ||
+          !library.getAsset(job.assetId)
+        ) {
+          continue;
+        }
+        const result = { ...recommendation, modelName: job.model.name };
+        recommendationStore.set(
+          library.rootPath,
+          asset,
+          job.analysisKey,
+          result,
+        );
+        await recommendationStore.flush();
+        sendRecommendation(job.assetId, {
+          status: "ready",
+          recommendation: result,
+        });
+      } catch (error) {
+        logger.error("[recommendation] Background category analysis failed", error);
+        if (job.generation === recommendationGeneration) {
+          sendRecommendation(job.assetId, {
+            status: "error",
+            error: error instanceof Error ? error.message : "Recommendation failed.",
+          });
+        }
+      }
+    }
+  } finally {
+    recommendationWorkers -= 1;
+    if (recommendationQueue.length > 0) startRecommendationWorkers();
+  }
+}
+
+async function createVisualPlan(request, resolvedModel = null) {
   const assets = library.assetsByType("image");
   if (assets.length === 0) throw new Error("There are no images in the current library.");
-  const analysisKey = requestKey(MODEL_REVISION, request.labels);
+  const model =
+    resolvedModel ?? (await visionAnalyzer.resolveModel(settings.get().visionModel));
+  const analysisKey = requestKey(`copilot:${model.id}`, request.labels);
   const classified = [];
   let failed = 0;
   let processed = 0;
   let cached = 0;
-  const batchSize = 4;
+  const batchSize = Math.max(1, Math.min(4, model.maxImages));
+  const concurrency = normalizeConcurrency(
+    settings.get().visionConcurrency,
+    Math.ceil(assets.length / batchSize),
+  );
+  const assetOrder = new Map(assets.map((asset, index) => [asset.id, index]));
+  let nextIndex = 0;
+  const analysisStartedAt = Date.now();
+
+  function progressTiming() {
+    const elapsedMs = Date.now() - analysisStartedAt;
+    return {
+      elapsedMs,
+      etaMs:
+        processed > 0
+          ? Math.max(0, Math.round((elapsedMs / processed) * (assets.length - processed)))
+          : null,
+    };
+  }
 
   send("organizer:progress", {
     phase: "starting",
     current: 0,
     total: assets.length,
-    message: "Preparing private on-device visual analysis…",
+    concurrency,
+    ...progressTiming(),
+    message: `Preparing ${model.name} cloud visual analysis with ${concurrency} parallel request${concurrency === 1 ? "" : "s"}…`,
   });
 
-  for (let start = 0; start < assets.length; start += batchSize) {
-    if (analysisCancelled) throw new Error("Visual analysis was cancelled. No plan was created.");
-    const batch = assets.slice(start, start + batchSize);
-    const pending = [];
-
-    for (const asset of batch) {
-      const cachedScores = visionStore.get(library.rootPath, asset, analysisKey);
-      if (cachedScores) {
-        cached += 1;
-        const selection = selectPriorityCategory(cachedScores, request.categories.length);
-        if (selection) classified.push({ asset, ...selection });
-        continue;
+  async function processBatches() {
+    while (true) {
+      if (analysisCancelled) {
+        throw new Error("Visual analysis was cancelled. No plan was created.");
       }
+      const start = nextIndex;
+      nextIndex += batchSize;
+      if (start >= assets.length) return;
+      const batch = assets.slice(start, start + batchSize);
+      const pending = [];
 
-      try {
-        pending.push({ asset, image: await prepareVisionImage(asset) });
-      } catch (error) {
-        failed += 1;
-        console.error(`[vision] ${asset.relativePath} could not be decoded:`, error);
-      }
-    }
+      for (const asset of batch) {
+        const cachedScores = visionStore.get(library.rootPath, asset, analysisKey);
+        if (cachedScores) {
+          cached += 1;
+          const selection = selectPriorityCategory(cachedScores, request.categories.length);
+          if (selection) classified.push({ asset, ...selection });
+          continue;
+        }
 
-    if (pending.length > 0) {
-      const scoreBatches = await visionAnalyzer.classify(
-        pending.map(({ image }) => image),
-        request.labels,
-        (progress) => {
-          const percent = progress.progress == null ? null : Math.round(progress.progress);
-          send("organizer:progress", {
-            phase: "model",
-            current: processed,
-            total: assets.length,
-            message:
-              percent == null
-                ? "Loading the pinned local vision model…"
-                : `Downloading the pinned local vision model… ${percent}%`,
+        try {
+          pending.push({
+            asset,
+            image: await prepareVisionImage(asset, model.maxImageSize),
           });
-        },
-      );
-      if (analysisCancelled) throw new Error("Visual analysis was cancelled. No plan was created.");
-      pending.forEach(({ asset }, index) => {
-        const scores = scoreBatches[index];
-        visionStore.set(library.rootPath, asset, analysisKey, scores);
-        const selection = selectPriorityCategory(scores, request.categories.length);
-        if (selection) classified.push({ asset, ...selection });
-      });
-      await visionStore.flush();
-    }
+        } catch (error) {
+          failed += 1;
+          logger.error(`[vision] ${asset.relativePath} could not be decoded`, error);
+        }
+      }
 
-    processed += batch.length;
-    send("organizer:progress", {
-      phase: "classifying",
-      current: processed,
-      total: assets.length,
-      message: `Analyzed ${processed.toLocaleString()} of ${assets.length.toLocaleString()} images${cached ? ` (${cached.toLocaleString()} cached)` : ""}…`,
-    });
+      if (pending.length > 0) {
+        const scoreBatches = await visionAnalyzer.classify(
+          pending.map(({ image }) => image),
+          request,
+          model,
+          (attempt) => {
+            send("organizer:progress", {
+              phase: "retrying",
+              current: processed,
+              total: assets.length,
+              concurrency,
+              ...progressTiming(),
+              message: `Retrying ${model.name} request (attempt ${attempt} of 3)…`,
+            });
+          },
+        );
+        if (analysisCancelled) {
+          throw new Error("Visual analysis was cancelled. No plan was created.");
+        }
+        pending.forEach(({ asset }, index) => {
+          const scores = scoreBatches[index];
+          visionStore.set(library.rootPath, asset, analysisKey, scores);
+          const selection = selectPriorityCategory(scores, request.categories.length);
+          if (selection) classified.push({ asset, ...selection });
+        });
+        await visionStore.flush();
+      }
+
+      processed += batch.length;
+      send("organizer:progress", {
+        phase: "classifying",
+        current: processed,
+        total: assets.length,
+        concurrency,
+        ...progressTiming(),
+        message: `Analyzed ${processed.toLocaleString()} of ${assets.length.toLocaleString()} images with ${model.name} using ${concurrency} parallel request${concurrency === 1 ? "" : "s"}${cached ? ` (${cached.toLocaleString()} cached)` : ""}…`,
+      });
+    }
   }
+
+  try {
+    await Promise.all(Array.from({ length: concurrency }, () => processBatches()));
+  } catch (error) {
+    analysisCancelled = true;
+    await visionAnalyzer.cancel();
+    throw error;
+  }
+  classified.sort((left, right) => assetOrder.get(left.asset.id) - assetOrder.get(right.asset.id));
 
   return createVisualOrganizationPlan(request, classified, {
     total: assets.length,
     failed,
+    modelName: model.name,
   });
 }
 
@@ -245,7 +420,7 @@ async function scanConfiguredRoot() {
     try {
       await activeScan.promise;
     } catch (error) {
-      console.error("[scan] Previous media root scan failed:", error);
+      logger.error("[scan] Previous media root scan failed", error);
     }
   }
 
@@ -267,6 +442,19 @@ async function scanConfiguredRoot() {
   }
 }
 
+async function moveAssetWithLocalData(asset, targetRelative) {
+  const finalRelative = await library.moveAsset(
+    asset.id,
+    asset.relativePath,
+    targetRelative,
+  );
+  await metadata.move(library.rootPath, asset.relativePath, finalRelative);
+  visionStore.move(library.rootPath, asset.relativePath, finalRelative);
+  recommendationStore.move(library.rootPath, asset.relativePath, finalRelative);
+  await Promise.all([visionStore.flush(), recommendationStore.flush()]);
+  return finalRelative;
+}
+
 function registerIpc() {
   handle("library:state", async () => {
     if (settings.get().mediaRoot && !library.rootPath) return scanConfiguredRoot();
@@ -278,9 +466,17 @@ function registerIpc() {
       properties: ["openDirectory"],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    const mediaRoot = await fs.realpath(result.filePaths[0]);
-    assertSeparateFolders(mediaRoot, settings.get().recycleBinRoot);
-    await settings.setMediaRoot(mediaRoot);
+    const selectedMediaRoot = result.filePaths[0];
+    const resolvedMediaRoot = await fs.realpath(selectedMediaRoot);
+    const recycleBinRoot = settings.get().recycleBinRoot;
+    const resolvedRecycleBin = recycleBinRoot ? await fs.realpath(recycleBinRoot) : null;
+    assertSeparateFolders(resolvedMediaRoot, resolvedRecycleBin);
+    await settings.commitUserSelection(
+      "mediaRoot",
+      selectedMediaRoot,
+      "media-folder-picker",
+    );
+    invalidateRecommendationQueue();
     return scanConfiguredRoot();
   });
   handle("settings:chooseRecycleBin", async () => {
@@ -289,13 +485,38 @@ function registerIpc() {
       properties: ["openDirectory", "createDirectory"],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    const recycleBinRoot = await fs.realpath(result.filePaths[0]);
-    assertSeparateFolders(library.rootPath ?? settings.get().mediaRoot, recycleBinRoot);
-    await settings.setRecycleBinRoot(recycleBinRoot);
+    const selectedRecycleBin = result.filePaths[0];
+    const resolvedRecycleBin = await fs.realpath(selectedRecycleBin);
+    const configuredMediaRoot = settings.get().mediaRoot;
+    const resolvedMediaRoot =
+      library.rootPath ?? (configuredMediaRoot ? await fs.realpath(configuredMediaRoot) : null);
+    assertSeparateFolders(resolvedMediaRoot, resolvedRecycleBin);
+    await settings.commitUserSelection(
+      "recycleBinRoot",
+      selectedRecycleBin,
+      "recycle-folder-picker",
+    );
     return libraryState();
   });
   handle("settings:clearRecycleBin", async () => {
-    await settings.setRecycleBinRoot(null);
+    if (!settings.get().recycleBinRoot) return libraryState();
+    const confirmation = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Use permanent deletion?",
+      message: "Clear the recycling folder setting?",
+      detail:
+        "Future deletions will permanently remove media from disk. This setting can only be changed by your confirmation.",
+      buttons: ["Keep recycling folder", "Use permanent deletion"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return null;
+    await settings.commitUserSelection(
+      "recycleBinRoot",
+      null,
+      "confirmed-recycle-clear",
+    );
     return libraryState();
   });
   handle("library:scan", scanConfiguredRoot);
@@ -317,21 +538,142 @@ function registerIpc() {
     const result = await library.deleteAsset(assetId, settings.get().recycleBinRoot);
     await metadata.remove(mediaRoot, asset.relativePath);
     visionStore.remove(mediaRoot, asset.relativePath);
-    await visionStore.flush();
+    recommendationStore.remove(mediaRoot, asset.relativePath);
+    await Promise.all([visionStore.flush(), recommendationStore.flush()]);
     thumbnailCache.delete(assetId);
     activePlan = null;
     return { ...result, state: libraryState() };
   });
+  handle("categories:assign", async (assetId, requestedCategory, description = "") => {
+    const asset = library.getAsset(assetId);
+    if (!asset || !library.rootPath) throw new Error("The media item is no longer available.");
+    const category = validateCategoryName(requestedCategory);
+    await fs.mkdir(path.join(library.rootPath, category), { recursive: true });
+    const categoriesBefore = JSON.stringify(categoryStore.list(library.rootPath));
+    const storedCategory = await categoryStore.add(
+      library.rootPath,
+      category,
+      description,
+    );
+    if (JSON.stringify(categoryStore.list(library.rootPath)) !== categoriesBefore) {
+      invalidateRecommendationQueue();
+    }
+    const currentParent = path.dirname(asset.relativePath);
+    let finalRelative = asset.relativePath;
+    if (currentParent.toLocaleLowerCase() !== storedCategory.name.toLocaleLowerCase()) {
+      finalRelative = await moveAssetWithLocalData(
+        asset,
+        path.join(storedCategory.name, asset.name),
+      );
+      await library.scan(library.rootPath);
+      clearThumbnailCache();
+    }
+    activePlan = null;
+    return {
+      category: storedCategory,
+      moved: finalRelative !== asset.relativePath,
+      finalRelative,
+      state: libraryState(),
+    };
+  });
+  handle("categories:updateDescription", async (category, description) => {
+    if (!library.rootPath) throw new Error("Choose and scan a media folder first.");
+    const updated = await categoryStore.updateDescription(
+      library.rootPath,
+      category,
+      description,
+    );
+    invalidateRecommendationQueue();
+    return { category: updated, state: libraryState() };
+  });
+  handle("categories:recommend", async (assetId) => {
+    const asset = library.getAsset(assetId);
+    if (!asset || !library.rootPath) throw new Error("The media item is no longer available.");
+    const categories = categoryStore.list(library.rootPath);
+    if (categories.length === 0) {
+      throw new Error("Create at least one category before asking for a recommendation.");
+    }
+    if (activeAnalysis) throw new Error("Another AI analysis is already running.");
+    activeAnalysis = true;
+    try {
+      const model = await visionAnalyzer.resolveModel(settings.get().visionModel);
+      const image = await prepareVisionImage(asset, model.maxImageSize);
+      const recommendation = await visionAnalyzer.recommendCategory(
+        image,
+        categories,
+        model,
+      );
+      return { ...recommendation, modelName: model.name };
+    } finally {
+      activeAnalysis = false;
+    }
+  });
+  handle("categories:precompute", async (assetIds, force = false) => {
+    if (
+      !Array.isArray(assetIds) ||
+      assetIds.some((assetId) => typeof assetId !== "string")
+    ) {
+      throw new Error("Recommendation precompute requires media item identifiers.");
+    }
+    return enqueueRecommendations(assetIds, force === true);
+  });
+  handle("categories:draftDescription", async (assetId, requestedCategory) => {
+    const asset = library.getAsset(assetId);
+    if (!asset || !library.rootPath) throw new Error("The media item is no longer available.");
+    const category = validateCategoryName(requestedCategory);
+    if (activeAnalysis) throw new Error("Another AI analysis is already running.");
+    activeAnalysis = true;
+    try {
+      const model = await visionAnalyzer.resolveModel(settings.get().visionModel);
+      const image = await prepareVisionImage(asset, model.maxImageSize);
+      const description = await visionAnalyzer.draftCategoryDescription(
+        image,
+        category,
+        model,
+      );
+      return { category, description, modelName: model.name };
+    } finally {
+      activeAnalysis = false;
+    }
+  });
   handle("organizer:plan", async (goal) => {
     if (!library.rootPath) throw new Error("Choose and scan a media folder first.");
     activePlan = null;
-    const visualRequest = parseVisualRequest(goal);
-    if (visualRequest) {
+    let visualRequest = parseVisualRequest(goal);
+    if (visualRequest || looksLikeVisualRequest(goal)) {
       if (activeAnalysis) throw new Error("Visual analysis is already running.");
       activeAnalysis = true;
       analysisCancelled = false;
       try {
-        activePlan = await createVisualPlan(visualRequest);
+        let model;
+        if (!visualRequest) {
+          model = await visionAnalyzer.resolveModel(settings.get().visionModel);
+          send("organizer:progress", {
+            phase: "interpreting",
+            current: 0,
+            total: 0,
+            concurrency: 1,
+            elapsedMs: 0,
+            etaMs: null,
+            message: `Interpreting the visual command with ${model.name}…`,
+          });
+          visualRequest = await visionAnalyzer.interpretRequest(
+            goal,
+            model,
+            (attempt) => {
+              send("organizer:progress", {
+                phase: "retrying",
+                current: 0,
+                total: 0,
+                concurrency: 1,
+                elapsedMs: 0,
+                etaMs: null,
+                message: `Retrying command interpretation (attempt ${attempt} of 3)…`,
+              });
+            },
+          );
+        }
+        activePlan = await createVisualPlan(visualRequest, model);
         return activePlan;
       } finally {
         activeAnalysis = false;
@@ -345,9 +687,42 @@ function registerIpc() {
     );
     return activePlan;
   });
-  handle("organizer:cancel", () => {
+  handle("organizer:cancel", async () => {
     analysisCancelled = true;
+    await visionAnalyzer.cancel();
     return true;
+  });
+  handle("vision:models", async () => {
+    const catalog = await visionAnalyzer.listModels();
+    const resolved = catalog.models.length
+      ? await visionAnalyzer.resolveModel(settings.get().visionModel)
+      : null;
+    return {
+      auth: catalog.auth,
+      models: catalog.models,
+      configuredModel: settings.get().visionModel,
+      selectedModel: resolved?.id ?? null,
+      concurrency: settings.get().visionConcurrency,
+    };
+  });
+  handle("vision:setModel", async (modelId) => {
+    const catalog = await visionAnalyzer.listModels();
+    if (!catalog.models.some((model) => model.id === modelId)) {
+      throw new Error("That model is not currently available to this Copilot account.");
+    }
+    await settings.commitUserSelection("visionModel", modelId, "model-picker");
+    invalidateRecommendationQueue();
+    return modelId;
+  });
+  handle("vision:setConcurrency", async (value) => {
+    await settings.commitUserSelection(
+      "visionConcurrency",
+      value,
+      "concurrency-picker",
+    );
+    visionAnalyzer.setMaxConcurrency(value);
+    startRecommendationWorkers();
+    return value;
   });
   handle("organizer:apply", async (planId, selectedItemIds) => {
     if (
@@ -375,10 +750,25 @@ function registerIpc() {
       );
       await metadata.move(library.rootPath, item.sourceRelative, finalRelative);
       visionStore.move(library.rootPath, item.sourceRelative, finalRelative);
+      recommendationStore.move(
+        library.rootPath,
+        item.sourceRelative,
+        finalRelative,
+      );
+      if (item.registerCategory) {
+        const categoriesBefore = categoryStore.list(library.rootPath).length;
+        await categoryStore.add(
+          library.rootPath,
+          item.targetRelative.split(path.sep)[0],
+        );
+        if (categoryStore.list(library.rootPath).length !== categoriesBefore) {
+          invalidateRecommendationQueue();
+        }
+      }
       results.push({ name: item.name, targetRelative: finalRelative });
     }
 
-    await visionStore.flush();
+    await Promise.all([visionStore.flush(), recommendationStore.flush()]);
     await library.scan(library.rootPath);
     clearThumbnailCache();
     activePlan = null;
@@ -428,12 +818,27 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setAppUserModelId("com.localcontentmanager.app");
-    settings = new SettingsStore(path.join(app.getPath("userData"), "settings.json"));
+    logger.initialize(app.getPath("userData"));
+    settings = new SettingsStore(
+      path.join(app.getPath("userData"), "settings.json"),
+      path.join(app.getPath("userData"), "settings-audit.jsonl"),
+    );
     metadata = new MetadataStore(path.join(app.getPath("userData"), "metadata.json"));
+    categoryStore = new CategoryStore(path.join(app.getPath("userData"), "categories.json"));
+    recommendationStore = new RecommendationStore(
+      path.join(app.getPath("userData"), "category-recommendations.json"),
+    );
     visionStore = new VisionStore(path.join(app.getPath("userData"), "vision-analysis.json"));
-    visionAnalyzer = new VisionAnalyzer(path.join(app.getPath("userData"), "vision-models"));
+    visionAnalyzer = new VisionAnalyzer(app.getPath("userData"), logger);
     library = new MediaLibrary();
-    await Promise.all([settings.load(), metadata.load(), visionStore.load()]);
+    await Promise.all([
+      settings.load(),
+      metadata.load(),
+      categoryStore.load(),
+      recommendationStore.load(),
+      visionStore.load(),
+    ]);
+    visionAnalyzer.setMaxConcurrency(settings.get().visionConcurrency);
 
     protocol.handle("local-media", (request) => {
       const url = new URL(request.url);
@@ -457,7 +862,6 @@ if (!app.requestSingleInstanceLock()) {
         },
       });
     });
-
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
       callback(false);
     });
@@ -471,7 +875,7 @@ if (!app.requestSingleInstanceLock()) {
       try {
         await scanConfiguredRoot();
       } catch (error) {
-        console.error("[startup] Could not scan the configured media folder:", error);
+        logger.error("[startup] Could not scan the configured media folder", error);
       }
     }
 
@@ -483,6 +887,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on("window-all-closed", async () => {
   analysisCancelled = true;
+  invalidateRecommendationQueue();
   await visionAnalyzer?.dispose();
   if (process.platform !== "darwin") app.quit();
 });

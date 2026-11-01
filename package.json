@@ -1,6 +1,7 @@
 {
   "name": "local-content-manager",
-  "version": "0.2.0",
+  "productName": "Local Content Manager",
+  "version": "0.9.2",
   "private": true,
   "description": "A privacy-first desktop organizer for local media libraries.",
   "main": "src/main/main.js",
@@ -11,17 +12,19 @@
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
     "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
     "test": "node --test",
-    "check": "node --check src/main/main.js && node --check src/main/media-library.js && node --check src/main/metadata-store.js && node --check src/main/organizer.js && node --check src/main/settings-store.js && node --check src/main/vision-analyzer.js && node --check src/main/vision-constants.js && node --check src/main/vision-store.js && node --check src/main/vision-worker.mjs && node --check src/main/preload.js && node --check src/renderer/app.js",
+    "check": "node --check src/main/main.js && node --check src/main/category-store.js && node --check src/main/local-logger.js && node --check src/main/media-library.js && node --check src/main/metadata-store.js && node --check src/main/organizer.js && node --check src/main/recommendation-store.js && node --check src/main/settings-store.js && node --check src/main/vision-analyzer.js && node --check src/main/vision-store.js && node --check src/main/preload.js && node --check src/renderer/app.js",
     "audit": "npm audit --audit-level=moderate"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.1"
+    "@github/copilot-sdk": "1.0.28"
   },
   "optionalDependencies": {
-    "@img/sharp-win32-x64": "0.35.5"
+    "@koromix/koffi-win32-x64": "3.2.1"
   },
   "allowScripts": {
-    "onnxruntime-node": false,
-    "protobufjs": false
+    "koffi": false
+  },
+  "overrides": {
+    "zod": "4.6.6"
   }
 }
