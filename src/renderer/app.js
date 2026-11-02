@@ -50,6 +50,13 @@ const elements = {
   categoryRecommendation: document.getElementById("category-recommendation"),
   categoryRecommendationText: document.getElementById("category-recommendation-text"),
   applyRecommendation: document.getElementById("apply-recommendation"),
+  categoryEditor: document.getElementById("category-editor"),
+  categoryEditorForm: document.getElementById("category-editor-form"),
+  categoryEditorName: document.getElementById("category-editor-name"),
+  categoryEditorDescription: document.getElementById("category-editor-description"),
+  categoryEditorError: document.getElementById("category-editor-error"),
+  categoryEditorCancel: document.getElementById("category-editor-cancel"),
+  categoryEditorSave: document.getElementById("category-editor-save"),
   organizerDialog: document.getElementById("organizer-dialog"),
   openOrganizer: document.getElementById("open-organizer"),
   closeOrganizer: document.getElementById("close-organizer"),
@@ -89,6 +96,7 @@ const state = {
   categoryRecommendation: null,
   categoryRecommendationStatus: null,
   categoryRecommendations: new Map(),
+  editingCategory: null,
   plan: null,
   selectedPlanItemIds: new Set(),
   visionModelsLoaded: false,
@@ -208,14 +216,19 @@ function createPreview(asset, detailed = false) {
   return glyph;
 }
 
+function matchesCategory(asset) {
+  if (state.categoryFilter === "*") return true;
+  const segments = asset.relativePath.split(/[\\/]/);
+  return state.categoryFilter
+    ? segments.length > 1 &&
+      segments[0].toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase()
+    : segments.length === 1;
+}
+
 function filteredAssets() {
   const query = state.search.trim().toLocaleLowerCase();
   return state.assets.filter((asset) => {
-    const segments = asset.relativePath.split(/[\\/]/);
-    const categoryMatches = state.categoryFilter
-      ? segments.length > 1 &&
-        segments[0].toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase()
-      : segments.length === 1;
+    const categoryMatches = matchesCategory(asset);
     const metadata = metadataFor(asset);
     const typeMatches =
       state.filter === "all" ||
@@ -231,13 +244,7 @@ function filteredAssets() {
 }
 
 function updateCounts() {
-  const scopedAssets = state.assets.filter((asset) => {
-    const segments = asset.relativePath.split(/[\\/]/);
-    return state.categoryFilter
-      ? segments.length > 1 &&
-          segments[0].toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase()
-      : segments.length === 1;
-  });
+  const scopedAssets = state.assets.filter(matchesCategory);
   const counts = { all: scopedAssets.length, image: 0, video: 0, audio: 0, favorite: 0 };
   for (const asset of scopedAssets) {
     counts[asset.type] += 1;
@@ -426,7 +433,9 @@ function render() {
   updateCounts();
   const visible = filteredAssets();
   const titles = { all: "All media", image: "Photos", video: "Videos", audio: "Audio", favorite: "Favorites" };
-  elements.viewTitle.textContent = state.categoryFilter
+  elements.viewTitle.textContent = state.categoryFilter === "*"
+    ? `All folders · ${titles[state.filter]}`
+    : state.categoryFilter
     ? `${state.categoryFilter} · ${titles[state.filter]}`
     : `Unsorted · ${titles[state.filter]}`;
   const scopedCount = Number(elements.counts.all.textContent.replaceAll(",", "")) || 0;
@@ -450,6 +459,7 @@ function setLibrary(nextState) {
   state.categories = nextCategories;
   if (
     state.categoryFilter &&
+    state.categoryFilter !== "*" &&
     !state.categories.some(
       (category) =>
         category.name.toLocaleLowerCase() === state.categoryFilter.toLocaleLowerCase(),
@@ -465,6 +475,10 @@ function setLibrary(nextState) {
   unsorted.value = "";
   unsorted.textContent = `Unsorted (${unsortedCount.toLocaleString()})`;
   elements.categoryView.appendChild(unsorted);
+  const allFolders = document.createElement("option");
+  allFolders.value = "*";
+  allFolders.textContent = `All folders (${state.assets.length.toLocaleString()})`;
+  elements.categoryView.appendChild(allFolders);
   for (const category of state.categories) {
     const categoryCount = state.assets.filter((asset) => {
       const segments = asset.relativePath.split(/[\\/]/);
@@ -595,6 +609,7 @@ function renderDetailsCategories() {
     edit.className = "category-edit";
     edit.textContent = "✎";
     edit.title = `Edit ${category.name} description`;
+    edit.setAttribute("aria-label", edit.title);
     edit.addEventListener("click", () => editCategoryDescription(category));
     item.append(button, edit);
     elements.detailsCategories.appendChild(item);
@@ -746,21 +761,46 @@ async function assignSelectedAssetToCategory(
   }
 }
 
-async function editCategoryDescription(category) {
-  const description = prompt(
-    `Description for "${category.name}"`,
-    category.description,
-  );
-  if (description === null) return;
+function editCategoryDescription(category) {
+  if (state.busy) return;
+  state.editingCategory = category.name;
+  elements.categoryEditorName.textContent = category.name;
+  elements.categoryEditorDescription.value = category.description;
+  elements.categoryEditorError.textContent = "";
+  elements.categoryEditorError.classList.add("hidden");
+  elements.categoryEditor.showModal();
+  elements.categoryEditorDescription.focus();
+}
+
+async function saveCategoryDescription(event) {
+  event.preventDefault();
+  if (state.busy || !state.editingCategory) return;
+  const category = state.editingCategory;
+  state.busy = true;
+  elements.categoryEditorSave.disabled = true;
+  elements.categoryEditorCancel.disabled = true;
+  elements.categoryEditorDescription.disabled = true;
+  elements.categoryEditorError.textContent = "";
+  elements.categoryEditorError.classList.add("hidden");
   try {
     const result = requireSuccess(
-      await api.updateCategoryDescription(category.name, description),
+      await api.updateCategoryDescription(category, elements.categoryEditorDescription.value),
     );
     setLibrary(result.state);
     if (elements.detailsDialog.open) schedulePreviewRecommendations();
-    showToast(`Updated ${category.name}.`);
+    elements.categoryEditor.close();
+    showToast(`Updated ${category}.`);
   } catch (error) {
+    elements.categoryEditorError.textContent = error.message;
+    elements.categoryEditorError.classList.remove("hidden");
     showToast(error.message, true);
+  } finally {
+    state.busy = false;
+    elements.categoryEditorSave.disabled = false;
+    elements.categoryEditorCancel.disabled = false;
+    elements.categoryEditorDescription.disabled = false;
+    if (elements.categoryEditor.open) elements.categoryEditorDescription.focus();
+    render();
   }
 }
 
@@ -1126,6 +1166,19 @@ elements.draftCategoryDescription.addEventListener(
   draftNewCategoryDescription,
 );
 elements.recommendCategory.addEventListener("click", recommendSelectedCategory);
+elements.categoryEditorForm.addEventListener("submit", saveCategoryDescription);
+elements.categoryEditorCancel.addEventListener("click", () => {
+  if (!state.busy) elements.categoryEditor.close();
+});
+elements.categoryEditor.addEventListener("cancel", (event) => {
+  if (state.busy) event.preventDefault();
+});
+elements.categoryEditor.addEventListener("close", () => {
+  state.editingCategory = null;
+  elements.categoryEditorDescription.value = "";
+  elements.categoryEditorError.textContent = "";
+  elements.categoryEditorError.classList.add("hidden");
+});
 elements.applyRecommendation.addEventListener("click", () => {
   if (!state.categoryRecommendation?.categoryName) return;
   assignSelectedAssetToCategory(state.categoryRecommendation.categoryName);
@@ -1143,6 +1196,13 @@ elements.detailsDialog.addEventListener("close", () => {
   state.categoryRecommendationStatus = null;
 });
 document.addEventListener("keydown", (event) => {
+  if (elements.categoryEditor.open) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!state.busy) elements.categoryEditor.close();
+    }
+    return;
+  }
   if (!elements.detailsDialog.open) return;
   if (event.key === "Escape") {
     event.preventDefault();

@@ -430,6 +430,8 @@ async function scanConfiguredRoot() {
   };
   scan.promise = (async () => {
     await library.scan(mediaRoot);
+    await categoryStore.refresh(library.rootPath);
+    invalidateRecommendationQueue();
     clearThumbnailCache();
     activePlan = null;
     return libraryState();
@@ -547,7 +549,9 @@ function registerIpc() {
   handle("categories:assign", async (assetId, requestedCategory, description = "") => {
     const asset = library.getAsset(assetId);
     if (!asset || !library.rootPath) throw new Error("The media item is no longer available.");
-    const category = validateCategoryName(requestedCategory);
+    const category = categoryStore.list(library.rootPath)
+      .find((entry) => entry.name === requestedCategory)?.name ??
+      validateCategoryName(requestedCategory);
     await fs.mkdir(path.join(library.rootPath, category), { recursive: true });
     const categoriesBefore = JSON.stringify(categoryStore.list(library.rootPath));
     const storedCategory = await categoryStore.add(
@@ -566,6 +570,7 @@ function registerIpc() {
         path.join(storedCategory.name, asset.name),
       );
       await library.scan(library.rootPath);
+      await categoryStore.refresh(library.rootPath);
       clearThumbnailCache();
     }
     activePlan = null;
@@ -620,7 +625,9 @@ function registerIpc() {
   handle("categories:draftDescription", async (assetId, requestedCategory) => {
     const asset = library.getAsset(assetId);
     if (!asset || !library.rootPath) throw new Error("The media item is no longer available.");
-    const category = validateCategoryName(requestedCategory);
+    const category = categoryStore.list(library.rootPath)
+      .find((entry) => entry.name === requestedCategory)?.name ??
+      validateCategoryName(requestedCategory);
     if (activeAnalysis) throw new Error("Another AI analysis is already running.");
     activeAnalysis = true;
     try {
@@ -770,6 +777,7 @@ function registerIpc() {
 
     await Promise.all([visionStore.flush(), recommendationStore.flush()]);
     await library.scan(library.rootPath);
+    await categoryStore.refresh(library.rootPath);
     clearThumbnailCache();
     activePlan = null;
     return { moved: results, state: libraryState() };

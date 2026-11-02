@@ -162,6 +162,23 @@
       </form>
     </dialog>
 
+    <dialog id="category-editor" class="modal category-editor" aria-labelledby="category-editor-title">
+      <form id="category-editor-form">
+        <h2 id="category-editor-title">Edit category description</h2>
+        <p id="category-editor-name"></p>
+        <label class="field" for="category-editor-description">
+          <span>Description (what belongs here)</span>
+          <textarea id="category-editor-description" maxlength="500" rows="5"></textarea>
+          <small>Saved with this library. Leave blank to clear the description.</small>
+        </label>
+        <p id="category-editor-error" class="category-editor-error hidden" role="alert"></p>
+        <div class="modal-actions">
+          <button id="category-editor-cancel" type="button" class="secondary">Cancel</button>
+          <button id="category-editor-save" type="submit" class="primary">Save description</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="organizer-dialog" class="modal organizer-modal">
       <div class="organizer-layout">
         <header>

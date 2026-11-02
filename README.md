@@ -42,13 +42,26 @@ Choose a media folder, add tags or favorites, describe how the private organizer
 
 ## Manual category triage
 
-User-defined categories are persisted per media library and backed by top-level folders. Each category has a folder title plus a free-text description that explains what belongs there. In the media preview:
+Every existing top-level, non-linked folder is discovered as a category on scan, including empty folders. Category definitions live in `.local-content-categories.json` at the library root, so local and UNC network libraries carry their definitions between PCs. The version-1 JSON file contains a `categories` array of `{ "name": "Folder", "description": "..." }` entries. Folder names are authoritative; descriptions explain what belongs there.
+
+Browsing does not create or modify metadata. Loading or rescanning a library automatically creates any missing top-level category folders from valid library definitions, preserving their descriptions without rewriting the JSON file or moving media. Read-only shares remain browsable when no category folders need to be created; missing folders require write access, and creation failures are reported explicitly. On the first save, matching descriptions from the former per-PC category store are migrated if no library definitions exist; newly discovered folders have blank descriptions. Legacy-only definitions do not create missing folders. Explicit seeding also saves these discovered definitions without moving media. Once library definitions exist, they are authoritative.
+
+Rescan after editing definitions or changing folders externally. Missing defined folders are recreated, including the original folder after an external rename unless its metadata name is also updated. Renamed folders are discovered with blank descriptions when the metadata still uses the old name; the app does not guess which renamed folder inherited a description. Malformed definitions and category paths occupied by files or symbolic links cause an explicit error. Saves use an exclusive `.local-content-categories.json.lock`, detect changes since the last scan, and replace the definitions atomically. All cooperating app instances honor the lock; external editors should edit only while no save is running. A stale lock after a crash must be removed manually once no writer is active. Saving requires write access to the library.
+
+Seed definitions from existing folders, preserving any matching legacy descriptions:
+
+```powershell
+npm run seed:categories -- "\\server\share\Library"
+```
+
+In the media preview:
 
 - The sidebar defaults to `Unsorted`, showing only loose root-level files, and can switch to any defined category folder. Every option includes its current file count.
+- `All folders` shows all scanned media, including nested subfolders, while retaining search and media-type filters.
 - Click a category to move the current item and advance automatically.
 - Create a category with a title and description to create its folder, move the item, and make the category immediately available.
 - Ask the selected Copilot vision model to draft an editable description from the current image and proposed category title before creation.
-- Edit category descriptions independently of folder names.
+- Use the pencil beside a category to open its in-app description editor. Save or cancel without moving the current image; blank descriptions clear the definition. Save errors remain visible in the editor with your text preserved for retry. Escape closes only the category editor, not the underlying preview.
 - Ask the selected Copilot vision model to recommend one available category from the titles and descriptions, then explicitly apply or ignore the recommendation.
 - Opening or navigating the preview asynchronously precomputes recommendations for the current image plus the next 24, within the configured global Copilot session limit. Results are cached by file, model, and category descriptions.
 - Ready recommendations also appear as category pills beside the media-type pill on thumbnails; no placeholder is shown while unavailable, uncertain, analyzing, or failed.

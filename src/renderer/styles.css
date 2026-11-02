@@ -237,6 +237,16 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   color: var(--muted); background: #f1fbf7; font-size: 10px;
 }
 .category-edit:hover { color: var(--text); background: #e4f5ee; }
+.category-editor { width: 480px; }
+.category-editor form { padding: 28px; }
+.category-editor h2 { margin: 0; }
+.category-editor #category-editor-name { color: var(--muted); overflow-wrap: anywhere; }
+.category-editor textarea {
+  width: 100%; resize: vertical; padding: 12px; border: 1px solid var(--line);
+  border-radius: 10px; color: var(--text); background: #fff; font: inherit; font-weight: 400;
+}
+.category-editor textarea:focus { outline-color: var(--accent); }
+.category-editor-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
 .category-button.recommended { color: #fff; border-color: var(--purple); background: var(--purple); }
 .category-empty { color: var(--muted); font-size: 10px; }
 .category-recommendation {

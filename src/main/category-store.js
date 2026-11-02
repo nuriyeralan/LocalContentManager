@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const RESERVED_WINDOWS_NAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const CATEGORY_FILE = ".local-content-categories.json";
 
 function normalizedRoot(rootPath) {
   const resolved = path.resolve(rootPath);
@@ -43,12 +44,28 @@ function validateCategoryDescription(value) {
   return description;
 }
 
+function validateExistingFolderName(value) {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > 255 ||
+    value === "." ||
+    value === ".." ||
+    /[<>:"/\\|?*\u0000-\u001f]/.test(value) ||
+    /[. ]$/.test(value) ||
+    RESERVED_WINDOWS_NAMES.test(value)
+  ) {
+    throw new Error("Category definition contains an invalid folder name.");
+  }
+  return value;
+}
+
 function normalizeCategory(category) {
   if (typeof category === "string") {
-    return { name: validateCategoryName(category), description: "" };
+    return { name: validateExistingFolderName(category), description: "" };
   }
   return {
-    name: validateCategoryName(category?.name),
+    name: validateExistingFolderName(category?.name),
     description: validateCategoryDescription(category?.description ?? ""),
   };
 }
@@ -57,7 +74,7 @@ class CategoryStore {
   constructor(filePath) {
     this.filePath = filePath;
     this.data = { version: 1, roots: {} };
-    this.writeQueue = Promise.resolve();
+    this.libraries = new Map();
   }
 
   async load() {
@@ -73,67 +90,162 @@ class CategoryStore {
   }
 
   list(rootPath) {
-    const categories = this.data.roots[rootKey(rootPath)]?.categories ?? [];
-    return categories
-      .map(normalizeCategory)
+    return structuredClone(this.libraries.get(rootKey(rootPath))?.categories ?? []);
+  }
+
+  async #readDefinitions(rootPath) {
+    const filePath = path.join(rootPath, CATEGORY_FILE);
+    try {
+      const stats = await fs.lstat(filePath);
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error("Category definitions must be a regular, unlinked file.");
+      }
+      const raw = await fs.readFile(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed?.version !== 1 || !Array.isArray(parsed.categories)) {
+        throw new Error("The library category definitions have an unsupported format.");
+      }
+      const categories = parsed.categories.map(normalizeCategory);
+      const names = categories.map((category) => category.name.toLocaleLowerCase());
+      if (new Set(names).size !== names.length) {
+        throw new Error("The library category definitions contain duplicate folder names.");
+      }
+      return { raw, categories };
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return { raw: null, categories: null };
+    }
+  }
+
+  async #discover(rootPath, definitions) {
+    const saved = definitions.categories ??
+      (this.data.roots[rootKey(rootPath)]?.categories ?? []).map(normalizeCategory);
+    const descriptions = new Map(
+      saved.map((category) => [category.name.toLocaleLowerCase(), category.description]),
+    );
+    let entries = await fs.readdir(rootPath, { withFileTypes: true });
+    const folders = new Set(
+      entries
+        .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+        .map((entry) => entry.name.toLocaleLowerCase()),
+    );
+    let createdFolders = false;
+    for (const category of definitions.categories ?? []) {
+      if (folders.has(category.name.toLocaleLowerCase())) continue;
+      const folderPath = path.join(rootPath, category.name);
+      try {
+        await fs.mkdir(folderPath);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        const stats = await fs.lstat(folderPath);
+        if (!stats.isDirectory() || stats.isSymbolicLink()) {
+          throw new Error(`Category folder "${category.name}" must be a regular, unlinked directory.`);
+        }
+      }
+      createdFolders = true;
+    }
+    if (createdFolders) entries = await fs.readdir(rootPath, { withFileTypes: true });
+    return entries
+      .filter((entry) =>
+        entry.isDirectory() &&
+        !entry.isSymbolicLink() &&
+        entry.name !== CATEGORY_FILE &&
+        !entry.name.startsWith(`${CATEGORY_FILE}.`),
+      )
+      .map((entry) => ({
+        name: validateExistingFolderName(entry.name),
+        description: descriptions.get(entry.name.toLocaleLowerCase()) ?? "",
+      }))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
 
+  async refresh(rootPath) {
+    const definitions = await this.#readDefinitions(rootPath);
+    const categories = await this.#discover(rootPath, definitions);
+    this.libraries.set(rootKey(rootPath), { ...definitions, categories });
+    return this.list(rootPath);
+  }
+
+  async seed(rootPath) {
+    await this.refresh(rootPath);
+    await this.#save(rootPath, () => {});
+    return this.list(rootPath);
+  }
+
   async add(rootPath, value, description = "") {
-    const name = validateCategoryName(value);
+    const name = this.list(rootPath).find((category) => category.name === value)?.name ??
+      validateCategoryName(value);
     const normalizedDescription = validateCategoryDescription(description);
-    const key = rootKey(rootPath);
-    const root = this.data.roots[key] ?? {
-      rootPath: path.resolve(rootPath),
-      categories: [],
-    };
-    this.data.roots[key] = root;
-    root.categories = root.categories.map(normalizeCategory);
-    const existing = root.categories.find(
-      (category) => category.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
-    );
-    if (existing) {
-      if (normalizedDescription && existing.description !== normalizedDescription) {
-        existing.description = normalizedDescription;
-        await this.#save();
-      }
-      return structuredClone(existing);
-    }
-    const category = { name, description: normalizedDescription };
-    root.categories.push(category);
-    await this.#save();
-    return structuredClone(category);
+    let result;
+    await this.#save(rootPath, (categories) => {
+      const category = categories.find(
+        (entry) => entry.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+      );
+      if (!category) throw new Error("Create the category folder before saving its definition.");
+      if (normalizedDescription) category.description = normalizedDescription;
+      result = structuredClone(category);
+    });
+    return result;
   }
 
   async updateDescription(rootPath, value, description) {
-    const name = validateCategoryName(value);
+    const name = validateExistingFolderName(value);
     const normalizedDescription = validateCategoryDescription(description);
-    const key = rootKey(rootPath);
-    const root = this.data.roots[key];
-    if (!root) throw new Error("Category was not found.");
-    root.categories = root.categories.map(normalizeCategory);
-    const category = root.categories.find(
-      (entry) => entry.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
-    );
-    if (!category) throw new Error("Category was not found.");
-    category.description = normalizedDescription;
-    await this.#save();
-    return structuredClone(category);
+    let result;
+    await this.#save(rootPath, (categories) => {
+      const category = categories.find(
+        (entry) => entry.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+      );
+      if (!category) throw new Error("Category folder was not found. Rescan the library.");
+      category.description = normalizedDescription;
+      result = structuredClone(category);
+    });
+    return result;
   }
 
-  #save() {
-    const snapshot = JSON.stringify(this.data, null, 2);
-    this.writeQueue = this.writeQueue.then(async () => {
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
-      await fs.writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
-      await fs.rename(temporaryPath, this.filePath);
-    });
-    return this.writeQueue;
+  async #save(rootPath, mutate) {
+    const key = rootKey(rootPath);
+    if (!this.libraries.has(key)) await this.refresh(rootPath);
+    const expectedRaw = this.libraries.get(key).raw;
+    const filePath = path.join(rootPath, CATEGORY_FILE);
+    const lockPath = `${filePath}.lock`;
+    let lock;
+    try {
+      lock = await fs.open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (error.code === "EEXIST") {
+        throw new Error("Category definitions are locked by another writer. Retry after it finishes; a stale lock after a crash must be removed manually.");
+      }
+      throw error;
+    }
+    const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      const definitions = await this.#readDefinitions(rootPath);
+      if (definitions.raw !== expectedRaw) {
+        throw new Error("Category definitions changed on disk. Rescan the library before saving.");
+      }
+      const categories = await this.#discover(rootPath, definitions);
+      mutate(categories);
+      const raw = `${JSON.stringify({ version: 1, categories }, null, 2)}\n`;
+      await fs.writeFile(temporaryPath, raw, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      await fs.rename(temporaryPath, filePath);
+      this.libraries.set(key, { raw, categories });
+    } finally {
+      try {
+        await fs.rm(temporaryPath, { force: true });
+      } finally {
+        try {
+          await lock.close();
+        } finally {
+          await fs.unlink(lockPath);
+        }
+      }
+    }
   }
 }
 
 module.exports = {
+  CATEGORY_FILE,
   CategoryStore,
   validateCategoryDescription,
   validateCategoryName,
