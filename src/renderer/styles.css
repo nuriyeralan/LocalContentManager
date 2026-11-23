@@ -128,6 +128,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   font-weight: 700;
 }
 .agent-button:hover { border-color: var(--purple); background-color: rgba(113, 86, 199, 0.12); }
+.topbar-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 
 .welcome {
   display: flex; flex-direction: column; align-items: center; max-width: 720px; margin: 14vh auto 0;
@@ -305,6 +306,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 }
 .analysis-progress progress { display: block; width: 100%; height: 12px; accent-color: var(--accent); }
 .analysis-progress div { display: flex; justify-content: space-between; gap: 16px; margin-top: 7px; color: var(--muted); font-size: 10px; }
+#library-progress p { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+#library-progress-text.error { color: var(--danger); }
 .plan { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
 .plan-head { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin-bottom: 12px; }
 .plan-head strong { display: block; margin-top: 5px; font-size: 13px; }
@@ -325,6 +328,39 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .plan footer { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
 .plan footer span { color: var(--muted); font-size: 11px; }
 
+.deduplication-navigation, .deduplication-actions {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px;
+}
+.deduplication-help, #deduplication-recycle-path { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.deduplication-groups { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.deduplication-group { padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: #f8faf8; }
+.deduplication-group-heading {
+  display: flex; justify-content: space-between; gap: 16px; margin-bottom: 9px; font-size: 11px;
+}
+.deduplication-group-heading span { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.deduplication-group-members { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 5px; }
+.deduplication-member {
+  display: grid; flex: 0 0 180px; grid-template-rows: 118px auto auto auto; min-width: 0;
+  padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: #fff;
+}
+.deduplication-member.keeper { border-color: var(--accent); background: #f1fbf7; }
+.deduplication-member.recycle { border-color: #e8bec1; background: #fff8f8; opacity: 0.78; }
+.deduplication-thumbnail { display: block; width: 100%; padding: 0; overflow: hidden; background: var(--panel-2); }
+.deduplication-member img { display: block; width: 100%; height: 118px; object-fit: contain; }
+.deduplication-member > strong {
+  overflow: hidden; margin-top: 7px; font-size: 10px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap;
+}
+.deduplication-member .deduplication-facts { margin-top: 4px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.deduplication-keeper-choice { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 10px; font-weight: 750; }
+.deduplication-member.keeper .deduplication-keeper-choice { color: var(--accent-strong); }
+.deduplication-member.recycle .deduplication-keeper-choice { color: var(--danger); }
+.deduplication-actions > div { min-width: 0; }
+.deduplication-actions strong { font-size: 12px; }
+.deduplication-preview { width: 1100px; padding: 20px; }
+.deduplication-preview img { display: block; max-width: 100%; max-height: 75vh; margin: auto; object-fit: contain; }
+#deduplication-failures { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+#deduplication-progress-text { overflow-wrap: anywhere; }
+
 .toast {
   position: fixed; z-index: 20; right: 26px; bottom: 26px; max-width: 430px; padding: 13px 17px;
   border: 1px solid #b7c8be; border-radius: 11px; background: #ffffff; box-shadow: 0 15px 40px rgba(28, 41, 35, 0.2);
@@ -337,6 +373,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   .shell { grid-template-columns: 240px 1fr; }
   .workspace { padding-inline: 24px; }
   .topbar { grid-template-columns: 1fr minmax(240px, 340px); }
-  .topbar .agent-button { grid-column: 2; grid-row: 2; justify-self: end; }
+  .topbar-actions { grid-column: 2; grid-row: 2; justify-self: end; }
   .topbar > div { grid-row: 1 / 3; }
 }

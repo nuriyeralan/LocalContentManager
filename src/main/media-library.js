@@ -6,6 +6,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const MAX_MEDIA_FILES = 100_000;
+const SCAN_CONCURRENCY = 16;
 const CONVERTED_PREVIEW_EXTENSIONS = new Set([".heic", ".heif", ".tif", ".tiff"]);
 const EXTENSIONS = new Map([
   [".jpg", "image"],
@@ -55,11 +56,59 @@ async function availableDestination(destinationPath) {
   let candidate = destinationPath;
   for (let suffix = 2; ; suffix += 1) {
     try {
-      await fs.access(candidate);
+      await fs.lstat(candidate);
       candidate = path.join(parsed.dir, `${parsed.name} (${suffix})${parsed.ext}`);
     } catch (error) {
       if (error.code === "ENOENT") return candidate;
       throw error;
+    }
+  }
+}
+
+async function ensureRecycleDirectory(rootPath, directory) {
+  let current = rootPath;
+  for (const component of path.relative(rootPath, directory).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    try {
+      await fs.mkdir(current);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    const stats = await fs.lstat(current);
+    if (stats.isSymbolicLink() || !stats.isDirectory() ||
+      !isWithin(rootPath, await fs.realpath(current))) {
+      throw new Error("The recycling destination contains a linked or invalid folder.");
+    }
+  }
+}
+
+async function recycleFile(sourcePath, destination) {
+  for (;;) {
+    const finalDestination = await availableDestination(destination);
+    let created = false;
+    try {
+      try {
+        await fs.link(sourcePath, finalDestination);
+        created = true;
+      } catch (error) {
+        if (!["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"].includes(error.code)) throw error;
+        const stats = await fs.stat(sourcePath);
+        await fs.copyFile(sourcePath, finalDestination, constants.COPYFILE_EXCL);
+        created = true;
+        await fs.utimes(finalDestination, stats.atime, stats.mtime);
+      }
+      await fs.unlink(sourcePath);
+      return finalDestination;
+    } catch (error) {
+      if (created) {
+        try {
+          await fs.unlink(finalDestination);
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError],
+            "The recycling destination and its source could not be reconciled safely.");
+        }
+      }
+      if (error.code !== "EEXIST") throw error;
     }
   }
 }
@@ -70,7 +119,18 @@ class MediaLibrary {
     this.assets = new Map();
   }
 
-  async scan(requestedRoot) {
+  async scan(requestedRoot, onProgress = () => {}) {
+    const startedAt = Date.now();
+    let current = 0;
+    let discovered = 0;
+    let lastProgressAt = 0;
+    function report(directory, force = false) {
+      const now = Date.now();
+      if (!force && now - lastProgressAt < 100) return;
+      lastProgressAt = now;
+      onProgress({ phase: "scanning", current, discovered, directory, elapsedMs: now - startedAt });
+    }
+    report(requestedRoot, true);
     const rootPath = await fs.realpath(requestedRoot);
     const rootStats = await fs.stat(rootPath);
     if (!rootStats.isDirectory()) throw new Error("The selected media location is not a folder.");
@@ -80,7 +140,9 @@ class MediaLibrary {
 
     while (pendingDirectories.length > 0) {
       const directory = pendingDirectories.pop();
+      report(directory);
       const entries = await fs.readdir(directory, { withFileTypes: true });
+      const mediaEntries = [];
       for (const entry of entries) {
         if (entry.isSymbolicLink()) continue;
         const absolutePath = path.join(directory, entry.name);
@@ -93,33 +155,54 @@ class MediaLibrary {
         const extension = path.extname(entry.name).toLocaleLowerCase();
         const type = EXTENSIONS.get(extension);
         if (!type) continue;
-        if (assets.length >= MAX_MEDIA_FILES) {
+        if (assets.length + mediaEntries.length >= MAX_MEDIA_FILES) {
           throw new Error(`This prototype supports up to ${MAX_MEDIA_FILES.toLocaleString()} media files per library.`);
         }
-
-        const stats = await fs.stat(absolutePath);
-        const relativePath = path.relative(rootPath, absolutePath);
-        const id = assetId(rootPath, relativePath);
-        assets.push({
-          id,
-          name: entry.name,
-          relativePath,
-          extension,
-          type,
-          size: stats.size,
-          modifiedAt: stats.mtime.toISOString(),
-          createdAt: stats.birthtime.toISOString(),
-          mediaUrl: `local-media://asset/${id}`,
-          thumbnailUrl: type === "image" ? `local-thumb://asset/${id}` : null,
-          previewUrl:
-            type === "image" && CONVERTED_PREVIEW_EXTENSIONS.has(extension)
-              ? `local-thumb://asset/${id}`
-              : `local-media://asset/${id}`,
-          absolutePath,
-        });
+        mediaEntries.push({ entry, absolutePath, extension, type });
       }
+      discovered += mediaEntries.length;
+      report(directory);
+      const directoryAssets = new Array(mediaEntries.length);
+      let next = 0;
+      let scanError;
+      const jobs = Array.from({ length: Math.min(SCAN_CONCURRENCY, mediaEntries.length) }, async () => {
+        while (next < mediaEntries.length && !scanError) {
+          const index = next++;
+          const { entry, absolutePath, extension, type } = mediaEntries[index];
+          try {
+            const stats = await fs.stat(absolutePath);
+            const relativePath = path.relative(rootPath, absolutePath);
+            const id = assetId(rootPath, relativePath);
+            directoryAssets[index] = {
+              id,
+              name: entry.name,
+              relativePath,
+              extension,
+              type,
+              size: stats.size,
+              modifiedAt: stats.mtime.toISOString(),
+              createdAt: stats.birthtime.toISOString(),
+              mediaUrl: `local-media://asset/${id}`,
+              thumbnailUrl: type === "image" ? `local-thumb://asset/${id}` : null,
+              previewUrl:
+                type === "image" && CONVERTED_PREVIEW_EXTENSIONS.has(extension)
+                  ? `local-thumb://asset/${id}`
+                  : `local-media://asset/${id}`,
+              absolutePath,
+            };
+            current += 1;
+            report(directory);
+          } catch (error) {
+            scanError ??= error;
+          }
+        }
+      });
+      await Promise.all(jobs);
+      if (scanError) throw scanError;
+      for (const asset of directoryAssets) assets.push(asset);
     }
 
+    report(rootPath, true);
     assets.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
     this.rootPath = rootPath;
     this.assets = new Map(assets.map((asset) => [asset.id, asset]));
@@ -186,29 +269,8 @@ class MediaLibrary {
       throw new Error("The recycling destination is invalid.");
     }
 
-    const finalDestination = await availableDestination(destination);
-    await fs.mkdir(path.dirname(finalDestination), { recursive: true });
-    try {
-      await fs.rename(asset.absolutePath, finalDestination);
-    } catch (error) {
-      if (error.code !== "EXDEV") throw error;
-      const sourceStats = await fs.stat(asset.absolutePath);
-      await fs.copyFile(asset.absolutePath, finalDestination, constants.COPYFILE_EXCL);
-      await fs.utimes(finalDestination, sourceStats.atime, sourceStats.mtime);
-      try {
-        await fs.unlink(asset.absolutePath);
-      } catch (unlinkError) {
-        try {
-          await fs.unlink(finalDestination);
-        } catch (cleanupError) {
-          throw new AggregateError(
-            [unlinkError, cleanupError],
-            "The copied file and its source could not be reconciled safely.",
-          );
-        }
-        throw unlinkError;
-      }
-    }
+    await ensureRecycleDirectory(resolvedRecycleBin, path.dirname(destination));
+    const finalDestination = await recycleFile(asset.absolutePath, destination);
 
     this.assets.delete(id);
     return {

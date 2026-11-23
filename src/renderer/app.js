@@ -19,6 +19,10 @@ const elements = {
   emptyResults: document.getElementById("empty-results"),
   resultSummary: document.getElementById("result-summary"),
   librarySize: document.getElementById("library-size"),
+  libraryProgress: document.getElementById("library-progress"),
+  libraryProgressBar: document.getElementById("library-progress-bar"),
+  libraryProgressText: document.getElementById("library-progress-text"),
+  libraryProgressDirectory: document.getElementById("library-progress-directory"),
   filters: [...document.querySelectorAll(".filter")],
   counts: {
     all: document.getElementById("count-all"),
@@ -58,9 +62,11 @@ const elements = {
   categoryEditorCancel: document.getElementById("category-editor-cancel"),
   categoryEditorSave: document.getElementById("category-editor-save"),
   organizerDialog: document.getElementById("organizer-dialog"),
-  openOrganizer: document.getElementById("open-organizer"),
+  openDeduplication: document.getElementById("open-deduplication"),
   closeOrganizer: document.getElementById("close-organizer"),
   visionModel: document.getElementById("vision-model"),
+  visionSettingsDialog: document.getElementById("vision-settings-dialog"),
+  openVisionSettings: document.getElementById("open-vision-settings"),
   visionConcurrency: document.getElementById("vision-concurrency"),
   visionModelStatus: document.getElementById("vision-model-status"),
   analysisProgress: document.getElementById("analysis-progress"),
@@ -413,7 +419,7 @@ function render() {
   elements.welcome.classList.toggle("hidden", hasLibrary);
   elements.collection.classList.toggle("hidden", !hasLibrary);
   elements.rescan.disabled = !hasLibrary || state.busy;
-  elements.openOrganizer.disabled = !hasLibrary || state.assets.length === 0 || state.busy;
+  elements.openDeduplication.disabled = !hasLibrary || !state.assets.some((asset) => asset.type === "image") || state.busy;
   elements.rootName.textContent = hasLibrary
     ? state.configuredMediaRoot.split(/[\\/]/).filter(Boolean).at(-1)
     : "No folder selected";
@@ -1196,6 +1202,7 @@ elements.detailsDialog.addEventListener("close", () => {
   state.categoryRecommendationStatus = null;
 });
 document.addEventListener("keydown", (event) => {
+  if (elements.visionSettingsDialog.open) return;
   if (elements.categoryEditor.open) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1238,11 +1245,15 @@ document.addEventListener("keydown", (event) => {
     deleteAsset(state.selectedAssetId, { advance: true, requireRecycle: true });
   }
 });
-elements.openOrganizer.addEventListener("click", () => {
-  elements.organizerDialog.showModal();
+elements.closeOrganizer.addEventListener("click", () => elements.organizerDialog.close());
+elements.openVisionSettings.addEventListener("click", () => {
+  elements.visionSettingsDialog.showModal();
   loadVisionModels(true);
 });
-elements.closeOrganizer.addEventListener("click", () => elements.organizerDialog.close());
+window.addEventListener("deduplication:library", (event) => {
+  setLibrary(event.detail);
+  render();
+});
 elements.visionModel.addEventListener("change", async () => {
   elements.visionModel.disabled = true;
   try {
@@ -1303,6 +1314,24 @@ elements.selectAll.addEventListener("change", () => {
 });
 elements.applyPlan.addEventListener("click", applyPlan);
 elements.planItems.addEventListener("scroll", schedulePlanRender, { passive: true });
+api.onLibraryProgress((progress) => {
+  elements.libraryProgress.classList.remove("hidden");
+  elements.libraryProgressDirectory.textContent = progress.directory ?? "";
+  const finished = progress.phase === "complete" || progress.phase === "error";
+  elements.libraryProgressBar.classList.toggle("hidden", finished);
+  elements.libraryProgressText.classList.toggle("error", progress.phase === "error");
+  if (progress.phase === "error") {
+    elements.libraryProgressText.textContent = `Scan failed: ${progress.message}`;
+  } else if (progress.phase === "complete") {
+    elements.libraryProgressText.textContent = `Scan complete. ${progress.current.toLocaleString()} media items found.`;
+  } else if (progress.phase === "categories") {
+    elements.libraryProgressText.textContent = "Loading library categories...";
+  } else {
+    elements.libraryProgressText.textContent =
+      `Scanning: ${progress.current.toLocaleString()} of ${progress.discovered.toLocaleString()} discovered media items checked. ` +
+      `Finding files... ${formatDuration(progress.elapsedMs)} elapsed.`;
+  }
+});
 api.onOrganizerProgress((progress) => {
   elements.goalStatus.className = "goal-status";
   elements.goalStatus.textContent = progress.message;
@@ -1345,10 +1374,14 @@ window.addEventListener("scroll", () => scheduleVirtualGridRender(), { passive: 
 window.addEventListener("resize", () => scheduleVirtualGridRender(true));
 
 async function initialize() {
+  state.busy = true;
+  render();
   try {
     setLibrary(requireSuccess(await api.getState()));
   } catch (error) {
     showToast(error.message, true);
+  } finally {
+    state.busy = false;
     render();
   }
 }

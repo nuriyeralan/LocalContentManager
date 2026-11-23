@@ -16,6 +16,7 @@ const {
 } = require("electron");
 
 const { CategoryStore, validateCategoryName } = require("./category-store");
+const { Deduplication } = require("./deduplication");
 const { MediaLibrary, isWithin } = require("./media-library");
 const { guardBrokenPipe, LocalLogger } = require("./local-logger");
 const { MetadataStore } = require("./metadata-store");
@@ -63,6 +64,7 @@ let metadata;
 let categoryStore;
 let recommendationStore;
 let library;
+let deduplication;
 let activePlan;
 let activeScan;
 let activeAnalysis = false;
@@ -125,6 +127,16 @@ function handle(channel, action) {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
       assertTrustedSender(event);
+      if (deduplication?.active && [
+        "library:chooseFolder", "library:scan", "library:delete",
+        "categories:assign", "organizer:apply", "organizer:plan",
+      ].includes(channel)) {
+        throw new Error("Close deduplication before changing or rescanning the library.");
+      }
+      if ((deduplication?.worker || deduplication?.applying) &&
+        ["settings:chooseRecycleBin", "settings:clearRecycleBin"].includes(channel)) {
+        throw new Error("Wait for deduplication to finish before changing the recycling folder.");
+      }
       return { ok: true, data: await action(...args) };
     } catch (error) {
       logger.error(`[ipc] ${channel} failed`, error);
@@ -412,6 +424,18 @@ async function createVisualPlan(request, resolvedModel = null) {
   });
 }
 
+async function refreshLibrary(rootPath) {
+  try {
+    await library.scan(rootPath, (progress) => send("library:progress", progress));
+    send("library:progress", { phase: "categories", current: library.assets.size });
+    await categoryStore.refresh(library.rootPath);
+    send("library:progress", { phase: "complete", current: library.assets.size });
+  } catch (error) {
+    send("library:progress", { phase: "error", message: error.message });
+    throw error;
+  }
+}
+
 async function scanConfiguredRoot() {
   const { mediaRoot } = settings.get();
   if (!mediaRoot) return libraryState();
@@ -429,8 +453,7 @@ async function scanConfiguredRoot() {
     promise: null,
   };
   scan.promise = (async () => {
-    await library.scan(mediaRoot);
-    await categoryStore.refresh(library.rootPath);
+    await refreshLibrary(mediaRoot);
     invalidateRecommendationQueue();
     clearThumbnailCache();
     activePlan = null;
@@ -457,7 +480,39 @@ async function moveAssetWithLocalData(asset, targetRelative) {
   return finalRelative;
 }
 
+async function removeAssetLocalData(asset) {
+  await metadata.remove(library.rootPath, asset.relativePath);
+  visionStore.remove(library.rootPath, asset.relativePath);
+  recommendationStore.remove(library.rootPath, asset.relativePath);
+  await Promise.all([visionStore.flush(), recommendationStore.flush()]);
+  thumbnailCache.delete(asset.id);
+  activePlan = null;
+}
+
 function registerIpc() {
+  handle("deduplication:scan", async (method, sensitivity, concurrency) => {
+    if (activeScan || activeAnalysis) throw new Error("Wait for the current scan or analysis to finish.");
+    invalidateRecommendationQueue();
+    return deduplication.scan(method, sensitivity, (progress) => {
+      if (progress.failure?.kind === "decoderCrash") {
+        logger.error(`[deduplication] Decoder crash for ${progress.failure.path}`,
+          new Error(progress.failure.error));
+      }
+      send("deduplication:progress", progress);
+    }, concurrency);
+  });
+  handle("deduplication:cancel", () => deduplication.cancel());
+  handle("deduplication:recycle", async (planId, choices) => {
+    if (deduplication.worker || deduplication.applying) throw new Error("Deduplication is already working.");
+    const recycleRoot = settings.get().recycleBinRoot;
+    if (!recycleRoot) throw new Error("Choose a recycling folder first. Deduplication never permanently deletes.");
+    const result = await deduplication.recycleChoices(
+      planId, choices, recycleRoot, removeAssetLocalData,
+      (progress) => send("deduplication:progress", progress),
+    );
+    if (result.error) logger.error("[deduplication] Recycling stopped", new Error(result.error));
+    return { ...result, state: libraryState() };
+  });
   handle("library:state", async () => {
     if (settings.get().mediaRoot && !library.rootPath) return scanConfiguredRoot();
     return libraryState();
@@ -536,14 +591,8 @@ function registerIpc() {
   handle("library:delete", async (assetId) => {
     const asset = library.getAsset(assetId);
     if (!asset || !library.rootPath) throw new Error("The media item is no longer available.");
-    const mediaRoot = library.rootPath;
     const result = await library.deleteAsset(assetId, settings.get().recycleBinRoot);
-    await metadata.remove(mediaRoot, asset.relativePath);
-    visionStore.remove(mediaRoot, asset.relativePath);
-    recommendationStore.remove(mediaRoot, asset.relativePath);
-    await Promise.all([visionStore.flush(), recommendationStore.flush()]);
-    thumbnailCache.delete(assetId);
-    activePlan = null;
+    await removeAssetLocalData(asset);
     return { ...result, state: libraryState() };
   });
   handle("categories:assign", async (assetId, requestedCategory, description = "") => {
@@ -569,8 +618,7 @@ function registerIpc() {
         asset,
         path.join(storedCategory.name, asset.name),
       );
-      await library.scan(library.rootPath);
-      await categoryStore.refresh(library.rootPath);
+      await refreshLibrary(library.rootPath);
       clearThumbnailCache();
     }
     activePlan = null;
@@ -776,8 +824,7 @@ function registerIpc() {
     }
 
     await Promise.all([visionStore.flush(), recommendationStore.flush()]);
-    await library.scan(library.rootPath);
-    await categoryStore.refresh(library.rootPath);
+    await refreshLibrary(library.rootPath);
     clearThumbnailCache();
     activePlan = null;
     return { moved: results, state: libraryState() };
@@ -839,6 +886,7 @@ if (!app.requestSingleInstanceLock()) {
     visionStore = new VisionStore(path.join(app.getPath("userData"), "vision-analysis.json"));
     visionAnalyzer = new VisionAnalyzer(app.getPath("userData"), logger);
     library = new MediaLibrary();
+    deduplication = new Deduplication(library);
     await Promise.all([
       settings.load(),
       metadata.load(),

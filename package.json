@@ -1,23 +1,25 @@
 {
   "name": "local-content-manager",
   "productName": "Local Content Manager",
-  "version": "0.9.4",
+  "version": "0.12.0",
   "private": true,
   "description": "A privacy-first desktop organizer for local media libraries.",
   "main": "src/main/main.js",
   "type": "commonjs",
   "scripts": {
-    "postinstall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-electron.ps1",
+    "postinstall": "npm run install-runtime && npm run build:decoder",
     "install-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-electron.ps1",
-    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
+    "build:decoder": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-decoder.ps1",
+    "start": "npm run build:decoder && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
     "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
     "seed:categories": "node scripts/seed-categories.js",
     "test": "node --test",
-    "check": "node --check src/main/main.js && node --check src/main/category-store.js && node --check src/main/local-logger.js && node --check src/main/media-library.js && node --check src/main/metadata-store.js && node --check src/main/organizer.js && node --check src/main/recommendation-store.js && node --check src/main/settings-store.js && node --check src/main/vision-analyzer.js && node --check src/main/vision-store.js && node --check src/main/preload.js && node --check src/renderer/app.js",
+    "check": "node --check src/main/main.js && node --check src/main/deduplication.js && node --check src/main/duplicate-scanner.js && node --check src/main/duplicate-worker.js && node --check src/main/duplicate-image-process.js && node --check src/main/windows-image-decoder.js && node --check src/main/image-similarity.js && node --check src/main/category-store.js && node --check src/main/local-logger.js && node --check src/main/media-library.js && node --check src/main/metadata-store.js && node --check src/main/organizer.js && node --check src/main/recommendation-store.js && node --check src/main/settings-store.js && node --check src/main/vision-analyzer.js && node --check src/main/vision-store.js && node --check src/main/preload.js && node --check src/renderer/app.js && node --check src/renderer/deduplication.js",
     "audit": "npm audit --audit-level=moderate"
   },
   "dependencies": {
-    "@github/copilot-sdk": "1.0.28"
+    "@github/copilot-sdk": "1.0.28",
+    "sharp": "0.35.5"
   },
   "optionalDependencies": {
     "@koromix/koffi-win32-x64": "3.2.1"

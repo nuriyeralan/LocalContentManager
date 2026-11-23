@@ -78,8 +78,16 @@
             <span aria-hidden="true">⌕</span>
             <input id="search" type="search" placeholder="Search names, paths, or tags" autocomplete="off" />
           </label>
-          <button id="open-organizer" class="agent-button">✦ Organize with agent</button>
+          <div class="topbar-actions">
+            <button id="open-deduplication" class="secondary" disabled>Deduplicate</button>
+          </div>
         </header>
+
+        <section id="library-progress" class="analysis-progress hidden">
+          <progress id="library-progress-bar" aria-label="Library scan progress"></progress>
+          <p id="library-progress-text" role="status" aria-live="polite"></p>
+          <p id="library-progress-directory" class="path"></p>
+        </section>
 
         <section id="welcome" class="welcome">
           <div class="welcome-art" aria-hidden="true">
@@ -88,8 +96,8 @@
           <span class="eyebrow">Private by design</span>
           <h2>Bring order to your media library.</h2>
           <p>
-            Browse photos, videos, and audio. Add local tags and favorites, then preview a safe
-            organization plan before any file moves.
+            Browse photos, videos, and audio. Add local tags and favorites, sort images into
+            categories, and review duplicates before recycling.
           </p>
           <button id="welcome-choose" class="primary large">Choose a media folder</button>
         </section>
@@ -127,7 +135,10 @@
           <section class="category-assignment">
             <div class="category-heading">
               <span>Move to category</span>
-              <button id="recommend-category" type="button" class="secondary compact">Ask AI</button>
+              <div class="button-row">
+                <button id="open-vision-settings" type="button" class="secondary compact">Vision settings</button>
+                <button id="recommend-category" type="button" class="secondary compact">Ask AI</button>
+              </div>
               <small>Moves immediately and advances to the next image.</small>
             </div>
             <div id="details-categories" class="category-list"></div>
@@ -179,18 +190,10 @@
       </form>
     </dialog>
 
-    <dialog id="organizer-dialog" class="modal organizer-modal">
+    <dialog id="vision-settings-dialog" class="modal organizer-modal" aria-labelledby="vision-settings-title">
       <div class="organizer-layout">
-        <header>
-          <div>
-            <span class="eyebrow">Local organization planner</span>
-            <h2>Describe the result you want</h2>
-            <p>
-              Uses metadata rules or your selected GitHub Copilot vision model.
-            </p>
-          </div>
-          <button id="close-organizer" class="close" aria-label="Close">×</button>
-        </header>
+        <form method="dialog"><button class="secondary">Close settings</button></form>
+        <h2 id="vision-settings-title">Vision settings</h2>
         <section class="model-settings">
           <label for="vision-model">Vision model</label>
           <select id="vision-model" disabled>
@@ -209,6 +212,19 @@
           Visual prompts upload resized, metadata-free image copies to GitHub Copilot for
           classification. Filenames and folder paths are not uploaded.
         </p>
+      </div>
+    </dialog>
+
+    <dialog id="organizer-dialog" class="modal organizer-modal">
+      <div class="organizer-layout">
+        <header>
+          <div>
+            <span class="eyebrow">Local organization planner</span>
+            <h2>Describe the result you want</h2>
+            <p>Uses metadata rules or your selected GitHub Copilot vision model.</p>
+          </div>
+          <button id="close-organizer" class="close" aria-label="Close">×</button>
+        </header>
         <form id="goal-form" class="goal-form">
           <textarea
             id="goal"
@@ -253,7 +269,80 @@
       </div>
     </dialog>
 
+    <dialog id="deduplication-dialog" class="modal organizer-modal" aria-labelledby="deduplication-title">
+      <div class="organizer-layout">
+        <header>
+          <div>
+            <span class="eyebrow">Local image deduplication</span>
+            <h2 id="deduplication-title">Find copies, choose what to keep</h2>
+            <p>Scans all images in every library folder, regardless of browsing filters. No uploads.</p>
+          </div>
+          <button id="close-deduplication" class="close" aria-label="Close deduplication">×</button>
+        </header>
+        <form id="deduplication-form" class="model-settings">
+          <label for="deduplication-method">Find duplicates by</label>
+          <select id="deduplication-method">
+            <option value="exact">Exact content (SHA-256)</option>
+            <option value="similar">Similar images (spectral analysis)</option>
+          </select>
+          <label for="deduplication-sensitivity">Similarity sensitivity</label>
+          <select id="deduplication-sensitivity" disabled>
+            <option value="conservative">Conservative (resizes and light crops)</option>
+            <option value="broader">Broader (more crop candidates; more false positives)</option>
+          </select>
+          <label for="deduplication-concurrency">Maximum parallel files</label>
+          <select id="deduplication-concurrency">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="4">4</option>
+            <option value="8">8</option>
+            <option value="16" selected>16</option>
+          </select>
+          <span>Both methods process files in parallel. Similar images also computes SHA-256. Lower this limit if your share or PC becomes overloaded.</span>
+          <span>SHA-256 identifies byte-identical files. Spectral analysis suggests resizes, recompressions and some crops, not semantic matches; animated images use their first frame. Nothing is selected for recycling automatically.</span>
+          <button id="scan-duplicates" type="submit" class="primary">Scan images</button>
+          <button id="cancel-deduplication" type="button" class="secondary hidden">Cancel scan</button>
+        </form>
+        <section id="deduplication-progress" class="analysis-progress hidden">
+          <progress id="deduplication-progress-bar" max="100" value="0" aria-label="Deduplication progress"></progress>
+          <div>
+            <span id="deduplication-progress-text" role="status" aria-live="polite"></span>
+            <span id="deduplication-progress-time"></span>
+          </div>
+        </section>
+        <p id="deduplication-status" class="goal-status" role="status" aria-live="polite">Start with exact copies, then try similarity for images with different sizes or crops.</p>
+        <details id="deduplication-failures" class="hidden">
+          <summary id="deduplication-failure-summary"></summary>
+          <ul id="deduplication-failure-list"></ul>
+        </details>
+        <section id="deduplication-review" class="hidden">
+          <div class="deduplication-navigation">
+            <button id="deduplication-previous" class="secondary">Previous 20 groups</button>
+            <strong id="deduplication-page-summary"></strong>
+            <button id="deduplication-next" class="secondary">Next 20 groups</button>
+          </div>
+          <p class="deduplication-help">Each row is one duplicate group. Select the image to keep; all other images in that row become recycle candidates automatically. Leave a row unselected to retain every image. Click a preview to enlarge it.</p>
+          <div id="deduplication-groups" class="deduplication-groups"></div>
+          <div class="deduplication-actions">
+            <div>
+              <strong id="deduplication-choice-summary">Unreviewed groups retain every image.</strong>
+              <p id="deduplication-recycle-path"></p>
+              <button id="deduplication-choose-recycle" class="secondary">Choose recycling folder</button>
+            </div>
+            <button id="accept-deduplication-choices" class="primary" disabled>Accept choices</button>
+          </div>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="deduplication-preview" class="modal deduplication-preview" aria-label="Compare image">
+      <form method="dialog"><button class="secondary">Close preview</button></form>
+      <p id="deduplication-preview-path" class="path"></p>
+      <img id="deduplication-preview-image" alt="" />
+    </dialog>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="app.js" type="module"></script>
+    <script src="deduplication.js" type="module"></script>
   </body>
 </html>

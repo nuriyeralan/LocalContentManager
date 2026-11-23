@@ -17,6 +17,7 @@ $runtimeVersionFile = Join-Path $projectRoot ".runtime\version"
 if (-not (Test-Path $runtimeExecutable) -or -not (Test-Path $runtimeVersionFile)) {
   throw "The verified Electron runtime is missing. Run npm install first."
 }
+& (Join-Path $PSScriptRoot "build-windows-decoder.ps1")
 
 $compilerCandidates = @(
   (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe"),
@@ -50,7 +51,19 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $installerPath)) {
   throw "Inno Setup failed to create the installer."
 }
 
-$hash = (Get-FileHash $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$stream = [System.IO.File]::OpenRead($installerPath)
+try {
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  }
+  finally {
+    $sha256.Dispose()
+  }
+}
+finally {
+  $stream.Dispose()
+}
 Set-Content -Path "$installerPath.sha256" -Value "$hash  $installerName" -Encoding ASCII
 Write-Output "Created $installerPath"
 Write-Output "SHA-256: $hash"

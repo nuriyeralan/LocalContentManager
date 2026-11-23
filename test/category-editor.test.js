@@ -13,7 +13,7 @@ const editorCode = source.slice(
 );
 const keyboardCode = source.slice(
   source.indexOf('document.addEventListener("keydown",'),
-  source.indexOf('elements.openOrganizer.addEventListener("click",'),
+  source.indexOf('elements.closeOrganizer.addEventListener("click",'),
 );
 
 function fixture(updateCategoryDescription = async () => ({ ok: true, data: { state: {} } })) {
@@ -33,6 +33,7 @@ function fixture(updateCategoryDescription = async () => ({ ok: true, data: { st
     categoryEditorSave: { disabled: false },
     categoryEditorCancel: { disabled: false },
     detailsDialog: { open: true },
+    visionSettingsDialog: { open: false },
   };
   const state = { busy: false, editingCategory: null, selectedAssetId: "current-image" };
   const toasts = [];
@@ -81,6 +82,14 @@ test("opens a focused in-app category editor without Electron's unsupported prom
   assert.equal(elements.categoryEditorDescription.focused, true);
   assert.equal(state.selectedAssetId, "current-image");
   assert.equal(calls.length, 0);
+});
+
+test("vision settings isolate underlying preview navigation and Escape", () => {
+  const editor = fixture();
+  editor.elements.visionSettingsDialog.open = true;
+  for (const key of ["Escape", "ArrowLeft", "ArrowRight", "Delete"]) editor.key(key);
+  assert.equal(editor.elements.detailsDialog.open, true);
+  assert.equal(editor.state.selectedAssetId, "current-image");
 });
 
 test("saving updates the definition without moving the preview and allows clearing it", async () => {

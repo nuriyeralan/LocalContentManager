@@ -10,6 +10,21 @@ contextBridge.exposeInMainWorld("localContent", {
   chooseRecycleBin: () => invoke("settings:chooseRecycleBin"),
   clearRecycleBin: () => invoke("settings:clearRecycleBin"),
   scan: () => invoke("library:scan"),
+  onLibraryProgress: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("library:progress", listener);
+    return () => ipcRenderer.removeListener("library:progress", listener);
+  },
+  scanDuplicates: (method, sensitivity, concurrency) =>
+    invoke("deduplication:scan", method, sensitivity, concurrency),
+  cancelDeduplication: () => invoke("deduplication:cancel"),
+  recycleDuplicates: (planId, choices) =>
+    invoke("deduplication:recycle", planId, choices),
+  onDeduplicationProgress: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("deduplication:progress", listener);
+    return () => ipcRenderer.removeListener("deduplication:progress", listener);
+  },
   updateMetadata: (assetId, patch) => invoke("metadata:update", assetId, patch),
   assignCategory: (assetId, category, description) =>
     invoke("categories:assign", assetId, category, description),
